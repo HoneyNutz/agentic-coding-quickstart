@@ -192,6 +192,41 @@ subcommand above is the direct path — no session restart required.
 If a rotated key is still rejected, it was likely truncated on copy — see
 [Known Failure Modes §20](../KNOWN_FAILURE_MODES.md#20-authentication-failed-after-copying-a-new-key).
 
+### Bring Your Own Key (Multi-Provider LLM Endpoints)
+
+In addition to USAi (`usai`), `acq` supports first-class **Bring Your Own Key (BYOK)**
+for external and custom generative LLM endpoints ([ADR-0035](../adr/0035-multi-provider-byok-endpoints.md)):
+
+| Provider ID | Default Host | Base URL | Injected Env Var |
+|-------------|--------------|----------|------------------|
+| `usai` | `api.gsa.usai.gov` | `https://api.gsa.usai.gov/api/v1` | `USAI_API_KEY` |
+| `openrouter` | `openrouter.ai` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `openai` | `api.openai.com` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `anthropic` | `api.anthropic.com` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
+| `gemini` | `generativelanguage.googleapis.com` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` |
+| `custom` | User-configured (`--host`) | User-configured (`--base-url`) | User-configured (`--env`) |
+
+```bash
+# 1. Configure a built-in provider (e.g., OpenRouter, OpenAI, Anthropic, Gemini)
+./acq configure --provider openrouter
+./acq secret set -g openrouter
+./acq run opencode /path/to/your/project
+
+# 2. Override provider for a single invocation
+./acq run opencode /path/to/your/project --provider openai
+
+# 3. Configure any custom OpenAI-compatible endpoint
+./acq configure --provider custom \
+  --host api.together.xyz \
+  --base-url https://api.together.xyz/v1 \
+  --env TOGETHER_API_KEY
+./acq secret set -g custom --host api.together.xyz --env TOGETHER_API_KEY
+./acq run opencode /path/to/your/project
+
+# 4. Rotate any provider's API key on the host
+./acq rotate-api-key openrouter
+```
+
 ---
 
 ## Installing acq

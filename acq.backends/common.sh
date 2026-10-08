@@ -308,22 +308,41 @@ acq_debug() {
 # Services acq manages in its own secret store (and knows how to inject). Used to
 # decide whether `acq secret rm` should route to the acq-owned removal path vs.
 # pass a raw placeholder token through to the backend secret CLI.
-ACQ_MANAGED_SECRET_SERVICES=" usai github gitlab "
+ACQ_MANAGED_SECRET_SERVICES=" usai openrouter openai anthropic gemini github gitlab "
+
+# Built-in generative LLM provider presets supported out of the box.
+# Users can also configure `custom` (or any custom service via `acq secret set --host ... --env ...`).
+ACQ_KNOWN_PROVIDERS=" usai openrouter openai anthropic gemini custom "
 
 # _acq_import_env_vars_for SERVICE — echo the host environment variable name(s)
 # that `acq secret import` reads to populate SERVICE, most-preferred first (space
 # separated). These mirror the env vars each backend already honors when binding
 # the service (see the sbx/msb adapters and the kits' env expectations):
-#   usai   <- USAI_API_KEY
-#   github <- GITHUB_TOKEN, then GH_TOKEN (gh CLI's variable)
-#   gitlab <- GITLAB_TOKEN
+#   usai       <- USAI_API_KEY
+#   openrouter <- OPENROUTER_API_KEY
+#   openai     <- OPENAI_API_KEY
+#   anthropic  <- ANTHROPIC_API_KEY
+#   gemini     <- GEMINI_API_KEY, then GOOGLE_API_KEY
+#   github     <- GITHUB_TOKEN, then GH_TOKEN (gh CLI's variable)
+#   gitlab     <- GITLAB_TOKEN
 # Only acq-managed services are importable; an unknown service echoes nothing.
 _acq_import_env_vars_for() {
   case "$1" in
-    usai)   printf '%s\n' "$USAI_PROVIDER_KEY_ENV" ;;
-    github) printf 'GITHUB_TOKEN GH_TOKEN\n' ;;
-    gitlab) printf 'GITLAB_TOKEN\n' ;;
-    *)      printf '\n' ;;
+    usai)       printf '%s\n' "$USAI_PROVIDER_KEY_ENV" ;;
+    openrouter) printf 'OPENROUTER_API_KEY\n' ;;
+    openai)     printf 'OPENAI_API_KEY\n' ;;
+    anthropic)  printf 'ANTHROPIC_API_KEY\n' ;;
+    gemini)     printf 'GEMINI_API_KEY GOOGLE_API_KEY\n' ;;
+    github)     printf 'GITHUB_TOKEN GH_TOKEN\n' ;;
+    gitlab)     printf 'GITLAB_TOKEN\n' ;;
+    *)          printf '\n' ;;
+  esac
+}
+
+acq_is_known_provider() {
+  case "$ACQ_KNOWN_PROVIDERS" in
+    *" ${1:-} "*) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
@@ -461,7 +480,144 @@ acq_provider_facts_load_from_kit_or_fallback() {
     # shellcheck disable=SC2034  # consumed by msb adapter functions at dispatch
     ACQ_MSB_USAI_HOST="$USAI_PROVIDER_BIND_HOSTS"
   fi
+  acq_provider_apply_active_facts
   return 0
+}
+
+# Resolve which generative LLM provider is active for this invocation/sandbox.
+# Precedence:
+#   1. Explicit CLI flag (`--provider <id>`, stored in ACQ_PROVIDER_FLAG) or `ACQ_PROVIDER` env var
+#   2. Durable `provider` field in config.yaml (`acq configure --provider <id>`)
+#   3. Auto-detect from stored credentials / host env vars (usai -> openrouter -> openai -> anthropic -> gemini)
+#   4. Fallback to `usai`
+acq_resolve_active_provider() {
+  local scope_sandbox="${1:-}" p=""
+  if [ -n "${ACQ_PROVIDER_FLAG:-}" ]; then
+    printf '%s\n' "$ACQ_PROVIDER_FLAG"
+    return 0
+  fi
+  if [ -n "${ACQ_PROVIDER:-}" ]; then
+    printf '%s\n' "$ACQ_PROVIDER"
+    return 0
+  fi
+  if command -v _acq_config_read_field >/dev/null 2>&1; then
+    p=$(_acq_config_read_field provider)
+    if [ -n "$p" ]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  fi
+  if command -v acq_secret_has >/dev/null 2>&1; then
+    acq_secret_has usai "$scope_sandbox" && { printf 'usai\n'; return 0; }
+    [ -n "${USAI_API_KEY:-}" ] && { printf 'usai\n'; return 0; }
+    acq_secret_has openrouter "$scope_sandbox" && { printf 'openrouter\n'; return 0; }
+    [ -n "${OPENROUTER_API_KEY:-}" ] && { printf 'openrouter\n'; return 0; }
+    acq_secret_has openai "$scope_sandbox" && { printf 'openai\n'; return 0; }
+    [ -n "${OPENAI_API_KEY:-}" ] && { printf 'openai\n'; return 0; }
+    acq_secret_has anthropic "$scope_sandbox" && { printf 'anthropic\n'; return 0; }
+    [ -n "${ANTHROPIC_API_KEY:-}" ] && { printf 'anthropic\n'; return 0; }
+    acq_secret_has gemini "$scope_sandbox" && { printf 'gemini\n'; return 0; }
+    [ -n "${GEMINI_API_KEY:-}${GOOGLE_API_KEY:-}" ] && { printf 'gemini\n'; return 0; }
+  fi
+  printf 'usai\n'
+}
+
+# Populate ACQ_ACTIVE_PROVIDER_* globals for the active provider.
+acq_provider_apply_active_facts() {
+  local arg1="${1:-}" scope_sandbox="${2:-}" prov=""
+  if [ -n "$arg1" ] && acq_is_known_provider "$arg1"; then
+    prov="$arg1"
+  else
+    scope_sandbox="$arg1"
+    prov=$(acq_resolve_active_provider "$scope_sandbox")
+  fi
+  ACQ_ACTIVE_PROVIDER="$prov"
+  case "$prov" in
+    usai)
+      ACQ_ACTIVE_PROVIDER_NAME="USAi"
+      ACQ_ACTIVE_PROVIDER_HOST="${USAI_PROVIDER_HOST:-api.gsa.usai.gov}"
+      ACQ_ACTIVE_PROVIDER_BASE_URL="${USAI_PROVIDER_BASE_URL:-https://${ACQ_ACTIVE_PROVIDER_HOST}/api/v1}"
+      ACQ_ACTIVE_PROVIDER_MODELS_URL="${USAI_PROVIDER_MODELS_URL:-${ACQ_ACTIVE_PROVIDER_BASE_URL}/models}"
+      ACQ_ACTIVE_PROVIDER_KEY_ENV="${USAI_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+      ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="${USAI_PROVIDER_KEY_MGMT_URL:-https://gsa.usai.gov/console/key-management}"
+      ACQ_ACTIVE_PROVIDER_BIND_HOSTS="${USAI_PROVIDER_BIND_HOSTS:-${ACQ_ACTIVE_PROVIDER_HOST}}"
+      ;;
+    openrouter)
+      ACQ_ACTIVE_PROVIDER_NAME="OpenRouter"
+      ACQ_ACTIVE_PROVIDER_HOST="openrouter.ai"
+      ACQ_ACTIVE_PROVIDER_BASE_URL="https://openrouter.ai/api/v1"
+      ACQ_ACTIVE_PROVIDER_MODELS_URL="https://openrouter.ai/api/v1/models"
+      ACQ_ACTIVE_PROVIDER_KEY_ENV="OPENROUTER_API_KEY"
+      ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="https://openrouter.ai/settings/keys"
+      ACQ_ACTIVE_PROVIDER_BIND_HOSTS="openrouter.ai"
+      ;;
+    openai)
+      ACQ_ACTIVE_PROVIDER_NAME="OpenAI"
+      ACQ_ACTIVE_PROVIDER_HOST="api.openai.com"
+      ACQ_ACTIVE_PROVIDER_BASE_URL="https://api.openai.com/v1"
+      ACQ_ACTIVE_PROVIDER_MODELS_URL="https://api.openai.com/v1/models"
+      ACQ_ACTIVE_PROVIDER_KEY_ENV="OPENAI_API_KEY"
+      ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="https://platform.openai.com/api-keys"
+      ACQ_ACTIVE_PROVIDER_BIND_HOSTS="api.openai.com"
+      ;;
+    anthropic)
+      ACQ_ACTIVE_PROVIDER_NAME="Anthropic"
+      ACQ_ACTIVE_PROVIDER_HOST="api.anthropic.com"
+      ACQ_ACTIVE_PROVIDER_BASE_URL="https://api.anthropic.com/v1"
+      ACQ_ACTIVE_PROVIDER_MODELS_URL="https://api.anthropic.com/v1/models"
+      ACQ_ACTIVE_PROVIDER_KEY_ENV="ANTHROPIC_API_KEY"
+      ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="https://console.anthropic.com/settings/keys"
+      ACQ_ACTIVE_PROVIDER_BIND_HOSTS="api.anthropic.com"
+      ;;
+    gemini)
+      ACQ_ACTIVE_PROVIDER_NAME="Gemini"
+      ACQ_ACTIVE_PROVIDER_HOST="generativelanguage.googleapis.com"
+      ACQ_ACTIVE_PROVIDER_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai"
+      ACQ_ACTIVE_PROVIDER_MODELS_URL="https://generativelanguage.googleapis.com/v1beta/openai/models"
+      ACQ_ACTIVE_PROVIDER_KEY_ENV="GEMINI_API_KEY"
+      ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="https://aistudio.google.com/apikey"
+      ACQ_ACTIVE_PROVIDER_BIND_HOSTS="generativelanguage.googleapis.com"
+      ;;
+    *)
+      # Custom provider ("custom" or a user-named custom service).
+      local chost="" cbase="" cmodels="" cenv="" cmgmt="" meta=""
+      if command -v _acq_config_read_field >/dev/null 2>&1; then
+        chost=$(_acq_config_read_field provider_host)
+        cbase=$(_acq_config_read_field provider_base_url)
+        cmodels=$(_acq_config_read_field provider_models_url)
+        cenv=$(_acq_config_read_field provider_key_env)
+        cmgmt=$(_acq_config_read_field provider_key_mgmt_url)
+      fi
+      [ -n "${ACQ_PROVIDER_HOST:-}" ] && chost="$ACQ_PROVIDER_HOST"
+      [ -n "${ACQ_PROVIDER_BASE_URL:-}" ] && cbase="$ACQ_PROVIDER_BASE_URL"
+      [ -n "${ACQ_PROVIDER_MODELS_URL:-}" ] && cmodels="$ACQ_PROVIDER_MODELS_URL"
+      [ -n "${ACQ_PROVIDER_KEY_ENV:-}" ] && cenv="$ACQ_PROVIDER_KEY_ENV"
+      [ -n "${ACQ_PROVIDER_KEY_MGMT_URL:-}" ] && cmgmt="$ACQ_PROVIDER_KEY_MGMT_URL"
+      if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
+        meta=$(acq_secret_meta_resolve "$prov" "$scope_sandbox" 2>/dev/null || true)
+        if [ -n "$meta" ]; then
+          [ -n "$cenv" ] || cenv="${meta%%	*}"
+          [ -n "$chost" ] || chost="${meta#*	}"
+        fi
+      fi
+      [ -n "$chost" ] || chost="localhost"
+      [ -n "$cbase" ] || cbase="https://${chost}/v1"
+      [ -n "$cmodels" ] || cmodels="${cbase%/}/models"
+      [ -n "$cenv" ] || cenv="CUSTOM_API_KEY"
+      [ -n "$cmgmt" ] || cmgmt="https://${chost}"
+      ACQ_ACTIVE_PROVIDER_NAME="${ACQ_PROVIDER_NAME:-$prov}"
+      ACQ_ACTIVE_PROVIDER_HOST="$chost"
+      ACQ_ACTIVE_PROVIDER_BASE_URL="$cbase"
+      ACQ_ACTIVE_PROVIDER_MODELS_URL="$cmodels"
+      ACQ_ACTIVE_PROVIDER_KEY_ENV="$cenv"
+      ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="$cmgmt"
+      ACQ_ACTIVE_PROVIDER_BIND_HOSTS="$chost"
+      ;;
+  esac
+  export ACQ_ACTIVE_PROVIDER ACQ_ACTIVE_PROVIDER_NAME ACQ_ACTIVE_PROVIDER_HOST \
+         ACQ_ACTIVE_PROVIDER_BASE_URL ACQ_ACTIVE_PROVIDER_MODELS_URL \
+         ACQ_ACTIVE_PROVIDER_KEY_ENV ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL \
+         ACQ_ACTIVE_PROVIDER_BIND_HOSTS
 }
 
 # _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's
@@ -733,7 +889,7 @@ acq_secret_import() {
     if [ -n "$only_service" ]; then
       echo "     '$only_service' reads: $(_acq_import_env_vars_for "$only_service")" >&2
     else
-      echo "     Looked for: USAI_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN." >&2
+      echo "     Looked for: USAI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY/GOOGLE_API_KEY, GITHUB_TOKEN/GH_TOKEN, GITLAB_TOKEN." >&2
     fi
     return 0
   fi
@@ -987,7 +1143,7 @@ slugify() {
 # True if PREV is a flag that consumes the next argument as its value.
 _takes_value() {
   case "$1" in
-    --name|--template|-t|--profile|--cpus|--memory|-m|--kit|--backend|--image) return 0 ;;
+    --name|--template|-t|--profile|--cpus|--memory|-m|--kit|--backend|--image|--provider) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1430,6 +1586,34 @@ extract_image_flag() {
   # A trailing `--image` with no value: warn but don't crash.
   if [ "$expect_image" -eq 1 ]; then
     echo "acq: --image given with no value; ignoring" >&2
+  fi
+}
+
+# Extract a user-supplied `--provider <id>` / `--provider=<id>` flag from a
+# run/create arg list. Populates ACQ_PROVIDER_FLAG and ACQ_PROVIDER_REMAINING
+# in the current shell. Stops at the first `--` separator.
+extract_provider_flag() {
+  ACQ_PROVIDER_FLAG=""
+  ACQ_PROVIDER_REMAINING=()
+  local expect_provider=0 arg
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    if [ "$expect_provider" -eq 1 ]; then
+      ACQ_PROVIDER_FLAG="$arg"
+      expect_provider=0
+      shift
+      continue
+    fi
+    case "$arg" in
+      --)           ACQ_PROVIDER_REMAINING+=("$@"); break ;;
+      --provider)   expect_provider=1 ;;
+      --provider=*) ACQ_PROVIDER_FLAG="${arg#--provider=}" ;;
+      *)            ACQ_PROVIDER_REMAINING+=("$arg") ;;
+    esac
+    shift
+  done
+  if [ "$expect_provider" -eq 1 ]; then
+    echo "acq: --provider given with no value; ignoring" >&2
   fi
 }
 
@@ -2414,13 +2598,26 @@ ensure_opencode_postinstall() {
 # to a bare code here. Only ^[0-9]{3}$ or "unreachable" or "" can ever escape —
 # no free-form error text can splice into the caller's "(HTTP …)" message.
 check_key() {
-  local name="$1"
-  local raw code exit_code key_ref
-  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
-  raw=$(acq_backend_run "$name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" 2>/dev/null || true)
+  local name="$1" explicit_prov="${2:-}"
+  local raw key_ref models_url
+  if [ -n "$explicit_prov" ]; then
+    acq_provider_apply_active_facts "$explicit_prov" "$name"
+  else
+    acq_provider_apply_active_facts "$name"
+  fi
+  key_ref="\$${ACQ_ACTIVE_PROVIDER_KEY_ENV}"
+  models_url="${ACQ_ACTIVE_PROVIDER_MODELS_URL}"
+  if [ "${ACQ_ACTIVE_PROVIDER:-usai}" = "anthropic" ]; then
+    raw=$(acq_backend_run "$name" -- sh -c \
+      "curl -sS -o /dev/null -w '%{http_code}' \
+       -H \"x-api-key: $key_ref\" -H \"anthropic-version: 2023-06-01\" \
+       $models_url; printf '|%s' \"\$?\"" 2>/dev/null || true)
+  else
+    raw=$(acq_backend_run "$name" -- sh -c \
+      "curl -sS -o /dev/null -w '%{http_code}' \
+       -H \"Authorization: Bearer $key_ref\" \
+       $models_url; printf '|%s' \"\$?\"" 2>/dev/null || true)
+  fi
   _classify_key_status "$raw"
 }
 
@@ -2474,29 +2671,38 @@ _classify_key_status() {
   printf '\n'
 }
 
-# Check USAi key in a fresh temporary sandbox (to distinguish bad key from stale
-# placeholder).
+# Check provider API key in a fresh temporary sandbox (to distinguish bad key
+# from stale placeholder).
 check_fresh_sandbox_key() {
   local validation_name="acq-keycheck-$$"
   local status=""
-  # The throwaway sandbox only needs the USAi binding. Publishing ports would
+  # The throwaway sandbox only needs the provider binding. Publishing ports would
   # make it contend with the real sandbox for every explicit host port (a
   # `--publish` pin or a kit's `host:`), fail its create, and silently skip this
   # check. Dynamic scoping hands the flag to acq_backend_provision.
   local _ACQ_PROVISION_WITHOUT_PORTS=1
 
+  acq_provider_apply_active_facts "${1:-}"
   # Use the backend to create a minimal sandbox for validation.
   if ! acq_backend_provision "$validation_name" shell . </dev/null >/dev/null 2>&1; then
     return 0
   fi
   # shellcheck disable=SC2064
   trap "acq_backend_terminate '$validation_name' </dev/null >/dev/null 2>&1 || true" EXIT
-  local raw key_ref
-  key_ref="\$${USAI_PROVIDER_KEY_ENV}"
-  raw=$(acq_backend_run "$validation_name" -- sh -c \
-    "curl -sS -o /dev/null -w '%{http_code}' \
-     -H \"Authorization: Bearer $key_ref\" \
-     $USAI_PROVIDER_MODELS_URL; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+  local raw key_ref models_url
+  key_ref="\$${ACQ_ACTIVE_PROVIDER_KEY_ENV}"
+  models_url="${ACQ_ACTIVE_PROVIDER_MODELS_URL}"
+  if [ "${ACQ_ACTIVE_PROVIDER:-usai}" = "anthropic" ]; then
+    raw=$(acq_backend_run "$validation_name" -- sh -c \
+      "curl -sS -o /dev/null -w '%{http_code}' \
+       -H \"x-api-key: $key_ref\" -H \"anthropic-version: 2023-06-01\" \
+       $models_url; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+  else
+    raw=$(acq_backend_run "$validation_name" -- sh -c \
+      "curl -sS -o /dev/null -w '%{http_code}' \
+       -H \"Authorization: Bearer $key_ref\" \
+       $models_url; printf '|%s' \"\$?\"" </dev/null 2>/dev/null || true)
+  fi
   status=$(_classify_key_status "$raw")
   acq_backend_terminate "$validation_name" </dev/null >/dev/null 2>&1 || true
   trap - EXIT
@@ -3056,6 +3262,7 @@ preflight_workspace_path() {
 advise_valid_key() {
   local name="$1"
   local status
+  acq_provider_apply_active_facts "$name"
   status=$(check_key "$name")
 
   # 200 = healthy; empty = could not validate (network/tooling) — stay quiet in
@@ -3073,54 +3280,48 @@ advise_valid_key() {
     return 0
   fi
 
-  echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
-  echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
-  echo "      key must be valid before an agent can use it." >&2
-  echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
-  echo "      validates and offers to rotate before attaching)." >&2
+  if [ "${ACQ_ACTIVE_PROVIDER:-usai}" = "usai" ]; then
+    echo "acq: note — your USAi API key looks invalid or expired (HTTP $status)." >&2
+    echo "      USAi keys expire every 7 days. This sandbox was created, but the" >&2
+    echo "      key must be valid before an agent can use it." >&2
+    echo "      To rotate: acq usai-rotate-api-key   (or re-run via 'acq run', which" >&2
+    echo "      validates and offers to rotate before attaching)." >&2
+  else
+    echo "acq: note — your ${ACQ_ACTIVE_PROVIDER_NAME} API key looks invalid or expired (HTTP $status)." >&2
+    echo "      This sandbox was created, but the key must be valid before an agent can use it." >&2
+    echo "      To rotate: acq rotate-api-key ${ACQ_ACTIVE_PROVIDER}   (or re-run via 'acq run')." >&2
+  fi
   return 0
 }
 
-# Print a network-oriented diagnosis when the USAi models API could not be
-# reached from the sandbox at all (curl connection failure / HTTP 000). This is
-# a reachability problem — NOT an invalid or expired key — so it deliberately
-# does not mention rotating the key. The point is an accurate diagnosis, not a
-# prescription: it states what failed and the signal to look for, and points at
-# the docs rather than guessing the user's network fix.
+# Print a network-oriented diagnosis when the provider models API could not be
+# reached from the sandbox at all (curl connection failure / HTTP 000).
 _report_usai_unreachable() {
+  local pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+  local murl="${ACQ_ACTIVE_PROVIDER_MODELS_URL:-$USAI_PROVIDER_MODELS_URL}"
   echo >&2
-  echo "acq: could not reach the USAi API ($USAI_PROVIDER_MODELS_URL) from the sandbox." >&2
+  echo "acq: could not reach the ${pname} API ($murl) from the sandbox." >&2
   echo "      The request did not complete (no HTTP response) — this is a network" >&2
   echo "      reachability problem, NOT an invalid or expired key, so rotating the" >&2
   echo "      key will not help." >&2
   echo "      If the playbook/kit fetch also failed with a TLS 'unexpected eof'," >&2
   echo "      both outbound connections are being cut — a strong sign of a network" >&2
-  echo "      or TLS-interception (e.g. corporate proxy) issue rather than USAi." >&2
+  echo "      or TLS-interception (e.g. corporate proxy) issue rather than ${pname}." >&2
   echo "      See docs/KNOWN_FAILURE_MODES.md for diagnosis steps." >&2
   echo >&2
 }
 
-# Print a DNS-oriented diagnosis when the USAi models API name did not RESOLVE
-# from the sandbox (curl exit 6 / NXDOMAIN). This is distinct from the broad
-# "unreachable" cut: the tell is that the name has no answer for the guest
-# resolver, while other public hosts (GitHub, npm) resolve and connect fine.
-#
-# The usual cause on GFE is split-horizon DNS — the USAi host resolves to an
-# INTERNAL address that only exists in the corporate/tunnel zone. The guest
-# follows the host's resolvers by default, with msb's rebind protection off on
-# a ZPA host, so this now points at a forced public resolver
-# (ACQ_MSB_DNS_NAMESERVER), rebind protection forced on
-# (ACQ_MSB_DNS_REBIND_PROTECTION=1), or a sandbox created while the tunnel was
-# down (detection missed; recreate with ACQ_MSB_DNS_REBIND_PROTECTION=0). A key
-# rotation cannot fix this, and neither can a msb data wipe. State the signal
-# and point at the docs.
+# Print a DNS-oriented diagnosis when the provider models API name did not RESOLVE
+# from the sandbox (curl exit 6 / NXDOMAIN).
 _report_usai_unresolved() {
+  local pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+  local murl="${ACQ_ACTIVE_PROVIDER_MODELS_URL:-$USAI_PROVIDER_MODELS_URL}"
   echo >&2
-  echo "acq: the USAi API host in $USAI_PROVIDER_MODELS_URL did not RESOLVE from the sandbox" >&2
+  echo "acq: the ${pname} API host in $murl did not RESOLVE from the sandbox" >&2
   echo "      (DNS returned no address). This is a name-resolution problem, NOT an" >&2
   echo "      invalid or expired key, so rotating the key will not help." >&2
   echo "      If other public hosts (GitHub, npm) work from the sandbox but only" >&2
-  echo "      USAi fails to resolve, USAi is likely a split-horizon name whose" >&2
+  echo "      ${pname} fails to resolve, ${pname} is likely a split-horizon name whose" >&2
   echo "      address lives in an internal/tunnel-only zone. Check that the guest" >&2
   echo "      follows the host's resolvers (ACQ_MSB_DNS_NAMESERVER unset) and that" >&2
   echo "      msb's rebind protection is not forced on (ACQ_MSB_DNS_REBIND_PROTECTION" >&2
@@ -3129,14 +3330,14 @@ _report_usai_unresolved() {
   echo >&2
 }
 
-# Diagnose a USAi value that is stored but cannot be presented by the active
-# backend (an undecryptable DPAPI envelope written under a different Windows
-# profile, or a damaged store). Reporting "not set" here would send the user to
-# create a fresh key when the real problem is the stored one.
+# Diagnose a provider value that is stored but cannot be presented by the active
+# backend.
 _report_usai_unreadable() {
-  echo "acq: a USAi API key is stored for this user, but it cannot be read or decrypted here." >&2
+  local svc="${ACQ_ACTIVE_PROVIDER:-usai}"
+  local pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+  echo "acq: a ${pname} API key is stored for this user, but it cannot be read or decrypted here." >&2
   echo "     It may have been stored under a different user or host, or the stored value is damaged." >&2
-  echo "     Re-set it with 'acq secret set -g usai' (or remove it with 'acq secret rm -g usai')." >&2
+  echo "     Re-set it with 'acq secret set -g ${svc}' (or remove it with 'acq secret rm -g ${svc}')." >&2
 }
 
 # acq_key_injectable SERVICE [SANDBOX] -> 0 if the ACTIVE BACKEND can inject
@@ -3159,92 +3360,93 @@ acq_key_injectable() {
   return 0
 }
 
-# ensure_key_present — pre-create gate: make sure a USAi API key is available to
-# the active backend BEFORE the sandbox is created. This must run before
-# acq_backend_provision on a fresh run because msb binds secrets only at create
-# time (--secret ENV@HOST), and sbx snapshots custom secret placeholders from its
-# proxy table at create time. A sandbox created without the backend-visible key
-# binding carries no working USAi credential.
-#
-# Returns 0 if a key is present (already, or after the user pastes one), 1 if the
-# user declines or setup fails. A no-op (returns 0) when the store helper isn't
-# loaded — the post-create ensure_valid_key gate still catches a bad key.
+# ensure_key_present — pre-create gate: make sure the active provider's API key
+# is available to the active backend BEFORE the sandbox is created.
 ensure_key_present() {
   local scope_sandbox="${1:-}"
   if ! command -v acq_secret_has >/dev/null 2>&1; then
     return 0
   fi
-  if acq_secret_has usai "$scope_sandbox"; then
-    # acq_key_injectable composes the store check (already true here) with the
-    # backend-inject check; it is the shared predicate `acq secret has` also uses.
-    acq_key_injectable usai "$scope_sandbox" && return 0
+  acq_provider_apply_active_facts "$scope_sandbox"
+  local svc="${ACQ_ACTIVE_PROVIDER:-usai}"
+  local pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+  local penv="${ACQ_ACTIVE_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+  local pmgmt="${ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL:-$USAI_PROVIDER_KEY_MGMT_URL}"
 
-    echo "acq: USAi API key is stored, but the active backend is not configured to inject it." >&2
-    echo "     Run 'acq secret set -g usai' from a terminal so the backend can bind it, then retry." >&2
+  if acq_secret_has "$svc" "$scope_sandbox"; then
+    acq_key_injectable "$svc" "$scope_sandbox" && return 0
+
+    echo "acq: ${pname} API key is stored, but the active backend is not configured to inject it." >&2
+    echo "     Run 'acq secret set -g ${svc}' from a terminal so the backend can bind it, then retry." >&2
     return 1
   fi
 
-  # Backend mismatch: msb provision also accepts a host-exported USAI_API_KEY and
-  # binds it at create time (see _acq_msb_bind_secrets_into in msb.sh), so an empty
-  # acq store is NOT a blocker under msb when the env var is set (e.g. CI). Treat
-  # that as present to avoid prompting/aborting a create msb would have satisfied.
-  # sbx does NOT read host env at provision, so this short-circuit is msb-only.
-  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ] && [ -n "${USAI_API_KEY:-}" ]; then
-    return 0
+  # Backend mismatch: msb provision also accepts a host-exported API key env var
+  # and binds it at create time (see _acq_msb_bind_secrets_into in msb.sh).
+  if [ "${ACQ_RESOLVED_BACKEND:-}" = "msb" ]; then
+    local _host_env_val=""
+    eval "_host_env_val=\${$penv:-}"
+    if [ -n "$_host_env_val" ]; then
+      return 0
+    fi
+    if [ "$svc" = "gemini" ] && [ -n "${GOOGLE_API_KEY:-}" ]; then
+      return 0
+    fi
   fi
 
-  # Present-but-unreadable: a value is stored for this user but cannot be read or
-  # decrypted (e.g. a DPAPI envelope written under a different Windows profile,
-  # or a damaged store). Reporting "not set" here would send the user to create a
-  # fresh key when the real problem is the stored one — fail closed with the real
-  # diagnosis instead.
-  if acq_secret_unreadable usai "$scope_sandbox"; then
+  if acq_secret_unreadable "$svc" "$scope_sandbox"; then
     _report_usai_unreadable
     return 1
   fi
 
-  # Non-interactive (CI / piped stdin): no one can answer the prompt below, so
-  # emit a single terse line and fail closed rather than the full interactive
-  # help (mirrors the non-tty guard in the kit-update path above).
   if [ ! -t 0 ]; then
-    echo "acq: no USAi API key stored; set one with 'acq secret set -g usai' (see $USAI_PROVIDER_KEY_MGMT_URL). Aborting." >&2
+    echo "acq: no ${pname} API key stored; set one with 'acq secret set -g ${svc}' (see $pmgmt). Aborting." >&2
     return 1
   fi
 
   echo >&2
-  echo "No USAi API key is stored yet." >&2
-  echo "USAi keys are created at $USAI_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2
+  echo "No ${pname} API key is stored yet." >&2
+  if [ "$svc" = "usai" ]; then
+    echo "USAi keys are created at $pmgmt and expire every 7 days." >&2
+  else
+    echo "${pname} keys are managed at $pmgmt." >&2
+  fi
   echo >&2
   echo "To set one:" >&2
-  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
+  echo "  1. Open $pmgmt" >&2
   echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
   echo >&2
 
   if ! command -v acq_backend_secret_set >/dev/null 2>&1; then
     echo "The '${ACQ_RESOLVED_BACKEND:-active}' backend does not implement key setup." >&2
-    echo "Set the key manually (acq secret set -g usai), then re-run." >&2
+    echo "Set the key manually (acq secret set -g ${svc}), then re-run." >&2
     return 1
   fi
 
   local answer=""
-  printf 'Have your USAi API key ready to paste? Set it now? [y/N] ' >&2
+  printf 'Have your %s API key ready to paste? Set it now? [y/N] ' "$pname" >&2
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      # Store the key in the acq store (read from the TTY; never argv). This does
-      # NOT create a sandbox — the value just needs to be present before create.
-      acq_backend_secret_set -g usai || {
-        echo "Key setup did not complete. Aborting." >&2
-        return 1
-      }
-      if acq_secret_has usai; then
+      if acq_is_known_provider "$svc" && [ "$svc" != "custom" ]; then
+        acq_backend_secret_set -g "$svc" || {
+          echo "Key setup did not complete. Aborting." >&2
+          return 1
+        }
+      else
+        acq_backend_secret_set -g "$svc" --host "$ACQ_ACTIVE_PROVIDER_HOST" --env "$penv" || {
+          echo "Key setup did not complete. Aborting." >&2
+          return 1
+        }
+      fi
+      if acq_secret_has "$svc"; then
         return 0
       fi
-      echo "No USAi API key was stored. Aborting." >&2
+      echo "No ${pname} API key was stored. Aborting." >&2
       return 1
       ;;
     *)
-      echo "Skipping. Aborting; re-run when your USAi API key is set." >&2
+      echo "Skipping. Aborting; re-run when your ${pname} API key is set." >&2
       return 1
       ;;
   esac
@@ -3254,6 +3456,11 @@ ensure_valid_key() {
   local name="$1"
   shift
   local status
+  acq_provider_apply_active_facts "$name"
+  local svc="${ACQ_ACTIVE_PROVIDER:-usai}"
+  local pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+  local penv="${ACQ_ACTIVE_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+  local pmgmt="${ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL:-$USAI_PROVIDER_KEY_MGMT_URL}"
   status=$(check_key "$name")
 
   if [ "$status" = "200" ]; then
@@ -3261,39 +3468,35 @@ ensure_valid_key() {
   fi
 
   if [ -z "$status" ]; then
-    echo "warning: could not validate USAI_API_KEY for '$name' (skipping check)" >&2
+    echo "warning: could not validate ${penv} for '$name' (skipping check)" >&2
     return 0
   fi
 
-  # The request never reached USAi (TLS reset / DNS / proxy interception /
-  # offline) — a NETWORK problem, not a key problem. Rotating a key cannot fix
-  # this, so DO NOT prompt to rotate. Fail closed (attaching would just fail on
-  # the first USAi call) with a network-oriented diagnosis.
   if [ "$status" = "unreachable" ]; then
     _report_usai_unreachable
     return 1
   fi
 
-  # DNS returned no address for the USAi host (curl exit 6). Distinct from a
-  # broad cut: the split-horizon-DNS case, where only USAi fails to resolve. A
-  # rotation cannot fix it, so fail closed with a resolver-oriented diagnosis.
   if [ "$status" = "unresolved" ]; then
     _report_usai_unresolved
     return 1
   fi
 
-  # A key IS stored (ensure_key_present gated create on that) but the models API
-  # rejected it: it is expired or invalid. Offer an in-place rotation, then
-  # re-validate THIS sandbox — the same one the agent will attach to, so a 200
-  # here is truthful (no throwaway-sandbox result stands in for the real one).
   echo >&2
-  echo "Your USAi API key looks invalid or expired (HTTP $status from the models API)." >&2
-  echo "USAi keys expire every 7 days." >&2
-  echo >&2
-  echo "To rotate it:" >&2
-  echo "  1. Open $USAI_PROVIDER_KEY_MGMT_URL" >&2
-  echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
-  echo "  3. Copy the new key using the console copy button" >&2
+  echo "Your ${pname} API key looks invalid or expired (HTTP $status from the models API)." >&2
+  if [ "$svc" = "usai" ]; then
+    echo "USAi keys expire every 7 days." >&2
+    echo >&2
+    echo "To rotate it:" >&2
+    echo "  1. Open $pmgmt" >&2
+    echo "  2. Choose 'Rotate' from the Actions menu for your key" >&2
+    echo "  3. Copy the new key using the console copy button" >&2
+  else
+    echo >&2
+    echo "To update it:" >&2
+    echo "  1. Open $pmgmt" >&2
+    echo "  2. Create or copy a valid ${pname} API key" >&2
+  fi
   echo >&2
 
   if ! command -v acq_backend_rotate_key >/dev/null 2>&1; then
@@ -3307,12 +3510,22 @@ ensure_valid_key() {
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
-      acq_backend_rotate_key || {
-        echo "Key setup did not complete. Aborting attach." >&2
-        return 1
-      }
-      if command -v acq_propagate_usai_rotation >/dev/null 2>&1; then
-        acq_propagate_usai_rotation || return 1
+      if [ "$svc" = "usai" ]; then
+        acq_backend_rotate_key || {
+          echo "Key setup did not complete. Aborting attach." >&2
+          return 1
+        }
+        if command -v acq_propagate_usai_rotation >/dev/null 2>&1; then
+          acq_propagate_usai_rotation || return 1
+        fi
+      else
+        acq_backend_rotate_key "$svc" || {
+          echo "Key setup did not complete. Aborting attach." >&2
+          return 1
+        }
+        if command -v acq_propagate_usai_rotation >/dev/null 2>&1; then
+          acq_propagate_usai_rotation "$svc" || return 1
+        fi
       fi
       status=$(check_key "$name")
       if [ "$status" = "200" ]; then
@@ -3323,7 +3536,7 @@ ensure_valid_key() {
       return 1
       ;;
     *)
-      echo "Skipping. Aborting attach; re-run when your USAi API key is set." >&2
+      echo "Skipping. Aborting attach; re-run when your ${pname} API key is set." >&2
       return 1
       ;;
   esac
@@ -3525,30 +3738,117 @@ acq_print_doctor() {
 # _acq_configure_show_current — print the current durable configuration
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
-  local cfg backend extras scope
+  local cfg backend provider extras scope
   cfg=$(_acq_config_file)
   backend=$(_acq_config_read_field backend)
+  provider=$(_acq_config_read_field provider)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
   echo "acq: current configuration (${cfg}):" >&2
   echo "      default backend:    ${backend:-<auto-detect>}" >&2
+  echo "      llm provider:       ${provider:-<auto-detect>}" >&2
   echo "      extra kits:         ${extras:-<none>}" >&2
   echo "      scope GitHub token: ${scope:-no}" >&2
   echo "" >&2
 }
 
+# _acq_configure_provider [ARGS...] — configure the default generative LLM
+# provider (built-in preset: usai, openrouter, openai, anthropic, gemini; or
+# custom endpoint with --host / --base-url / --models-url / --env).
+_acq_configure_provider() {
+  local prov="" chost="" cbase="" cmodels="" cenv="" cmgmt=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --provider)   prov="${2:-}"; shift ;;
+      --provider=*) prov="${1#--provider=}" ;;
+      --host)       chost="${2:-}"; shift ;;
+      --host=*)     chost="${1#--host=}" ;;
+      --base-url)   cbase="${2:-}"; shift ;;
+      --base-url=*) cbase="${1#--base-url=}" ;;
+      --models-url) cmodels="${2:-}"; shift ;;
+      --models-url=*) cmodels="${1#--models-url=}" ;;
+      --env)        cenv="${2:-}"; shift ;;
+      --env=*)      cenv="${1#--env=}" ;;
+      --key-mgmt-url) cmgmt="${2:-}"; shift ;;
+      --key-mgmt-url=*) cmgmt="${1#--key-mgmt-url=}" ;;
+      -*)
+        echo "acq: configure: unknown flag '$1'" >&2
+        return 1
+        ;;
+      *)
+        [ -z "$prov" ] && prov="$1"
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$prov" ]; then
+    if [ ! -t 0 ]; then
+      echo "acq: configure --provider requires a provider name (usai, openrouter, openai, anthropic, gemini, custom)." >&2
+      return 1
+    fi
+    echo "Select default LLM provider:" >&2
+    echo "  1) usai       (GSA USAi — api.gsa.usai.gov)" >&2
+    echo "  2) openrouter (OpenRouter — openrouter.ai)" >&2
+    echo "  3) openai     (OpenAI — api.openai.com)" >&2
+    echo "  4) anthropic  (Anthropic — api.anthropic.com)" >&2
+    echo "  5) gemini     (Google Gemini — generativelanguage.googleapis.com)" >&2
+    echo "  6) custom     (Custom OpenAI-compatible endpoint)" >&2
+    printf "Provider [usai]: " >&2
+    read -r prov || true
+    case "$prov" in
+      ""|1|usai)       prov="usai" ;;
+      2|openrouter)    prov="openrouter" ;;
+      3|openai)        prov="openai" ;;
+      4|anthropic)     prov="anthropic" ;;
+      5|gemini)        prov="gemini" ;;
+      6|custom)        prov="custom" ;;
+    esac
+  fi
+
+  case "$prov" in
+    *[!A-Za-z0-9_-]*)
+      echo "acq: configure: invalid provider name '$prov'" >&2
+      return 1
+      ;;
+  esac
+
+  if [ "$prov" = "custom" ] && [ -z "$chost" ] && [ -t 0 ]; then
+    printf "Custom endpoint host (e.g. llm.example.com): " >&2
+    read -r chost || true
+    printf "Custom base URL [https://%s/v1]: " "${chost:-localhost}" >&2
+    read -r cbase || true
+    printf "Custom API key env var [CUSTOM_API_KEY]: " >&2
+    read -r cenv || true
+  fi
+
+  _acq_config_write_field provider "$prov"
+  if [ "$prov" = "custom" ] || [ -n "$chost" ] || [ -n "$cbase" ] || [ -n "$cmodels" ] || [ -n "$cenv" ] || [ -n "$cmgmt" ]; then
+    [ -n "$chost" ]   && _acq_config_write_field provider_host "$chost"
+    [ -n "$cbase" ]   && _acq_config_write_field provider_base_url "$cbase"
+    [ -n "$cmodels" ] && _acq_config_write_field provider_models_url "$cmodels"
+    [ -n "$cenv" ]    && _acq_config_write_field provider_key_env "$cenv"
+    [ -n "$cmgmt" ]   && _acq_config_write_field provider_key_mgmt_url "$cmgmt"
+  fi
+  acq_provider_apply_active_facts
+  echo "acq: configured LLM provider '${prov}' in $(_acq_config_file)." >&2
+  echo "      endpoint host: ${ACQ_ACTIVE_PROVIDER_HOST}" >&2
+  echo "      api key env:   ${ACQ_ACTIVE_PROVIDER_KEY_ENV}" >&2
+  echo "      store key via: acq secret set -g ${prov}" >&2
+  return 0
+}
+
 # acq_configure — the interactive configuration flow. Presents the opt-in kit
 # catalog as a multiselect (pre-checked from the current config), then a confirm
 # for the GitHub-token-scoping default, and persists both to config.yaml
-# (preserving the `backend:` key). Non-interactive callers keep the current
-# config unchanged (the widgets fail-open to defaults) and only re-print it.
-#
-# The kit selection is stored as a whitespace-separated list of the CHOSEN opt-in
-# kit NAMES (e.g. "openchamber paseo") under extra_kits:, not the fully-expanded
-# git refs — the ref is rebuilt from PATTERNS_KIT_REF at apply time so a later pin
-# bump moves configured kits forward automatically. A user's own custom refs (set
-# via ACQ_EXTRA_KITS) are layered separately and are not managed here.
+# (preserving the `backend:` key). Also accepts `--provider <id>` to configure
+# the default generative LLM provider directly.
 acq_configure() {
+  if [ "$#" -gt 0 ]; then
+    _acq_configure_provider "$@"
+    return $?
+  fi
+
   _acq_configure_show_current
 
   # Non-interactive (CI / piped / ACQ_NO_PROMPT): make NO changes — just show the
@@ -3556,7 +3856,8 @@ acq_configure() {
   # previously-configured file with the widget defaults.
   if ! _acq_prompt_interactive; then
     echo "acq: non-interactive; configuration unchanged." >&2
-    echo "      Run 'acq configure' from a terminal to change kits/token scoping." >&2
+    echo "      Run 'acq configure' from a terminal to change kits/token scoping," >&2
+    echo "      or 'acq configure --provider <name>' to set the LLM provider." >&2
     return 0
   fi
 

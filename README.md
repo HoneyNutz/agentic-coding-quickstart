@@ -213,9 +213,12 @@ restricted filesystem and network access. Repeat Step 3 for each project.
 
 On first run, `acq` sets you up interactively — nothing to configure beforehand:
 
-- **USAi key** — `acq` prompts you to paste a key and validates it. Create one at
-  the [USAi key console](https://gsa.usai.gov/console/key-management) (keys expire
-  every 7 days).
+- **LLM API key (USAi or Bring Your Own Key)** — `acq` prompts you to paste a key
+  and validates it. By default it uses [USAi](https://gsa.usai.gov/console/key-management)
+  (keys expire every 7 days), or you can use **OpenRouter, OpenAI, Anthropic,
+  Gemini, or any custom OpenAI-compatible endpoint** via `acq configure --provider <id>`
+  (see [Bring Your Own Key](docs/howto/acq.md#bring-your-own-key-multi-provider-llm-endpoints)
+  and [ADR-0035](docs/adr/0035-multi-provider-byok-endpoints.md)).
 - **GitHub token** — when your project contains GitHub repos, `acq` offers to walk
   you through creating a repo-scoped token. You can decline and add one later.
 - **Git signing** — `acq` warns if your commits won't sign/verify correctly, and

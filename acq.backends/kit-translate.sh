@@ -123,7 +123,7 @@ kit_translate_fetch() {
           printf '%s/*\n' "$dir" > .git/info/sparse-checkout
           # shellcheck disable=SC2086
           git $_cfg fetch --depth 1 origin "$ref" 2>&1 || exit 1
-          git checkout -q FETCH_HEAD 2>&1 || exit 1
+          git checkout -f -q FETCH_HEAD 2>&1 || exit 1
         )
       }
       local _ferr _anon_cfg
@@ -147,6 +147,7 @@ kit-translate:   helper is configured (a prompt-less helper).
 EOM
         return 1
       fi
+      _kit_translate_upgrade_provider_kit "$destdir/$dir"
       printf '%s/%s\n' "$destdir" "$dir"
       ;;
     *)
@@ -155,9 +156,188 @@ EOM
         echo "kit-translate: local kit path not found: $kitref" >&2
         return 1
       fi
+      _kit_translate_upgrade_provider_kit "$kitref"
       printf '%s\n' "$kitref"
       ;;
   esac
+}
+
+# ---------------------------------------------------------------------------
+# _kit_translate_upgrade_provider_kit KITDIR
+# ---------------------------------------------------------------------------
+# When the built-in `usai-provider` kit is materialized, unlock OpenCode from
+# being restricted exclusively to USAi (`"enabled_providers": ["usai"]`), inject
+# the OpenRouter (and optional custom OpenAI-compatible) provider config into
+# `opencode.jsonc`, ensure `merge-global-config.mjs` clears any legacy
+# `enabled_providers: ["usai"]` lock on existing sandboxes, and add the preset
+# generative endpoint hosts to `spec.yaml`'s `caps.network.allow`.
+# No-op for any kit that does not carry `files/home/usai-config/opencode.jsonc`.
+_kit_translate_prepare_orig() {
+  local kitdir="$1" file="$2"
+  [ -f "$file" ] || return 1
+  rm -f "${file}.orig" 2>/dev/null || true
+  local orig="$kitdir/.orig-$(basename "$file")"
+  if git -C "$kitdir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$kitdir" checkout -f -- "$file" >/dev/null 2>&1 || true
+  elif [ -f "$orig" ]; then
+    cp "$orig" "$file"
+  else
+    cp "$file" "$orig"
+  fi
+}
+
+_kit_translate_upgrade_opencode_jsonc() {
+  local kitdir="$1"
+  local oc_jsonc="$kitdir/files/home/usai-config/opencode.jsonc"
+  _kit_translate_prepare_orig "$kitdir" "$oc_jsonc" || return 0
+
+  local has_openrouter=0
+  grep -q '"openrouter"[[:space:]]*:' "$oc_jsonc" 2>/dev/null && has_openrouter=1
+  local custom_base="${ACQ_ACTIVE_PROVIDER_BASE_URL:-}"
+  local custom_env="${ACQ_ACTIVE_PROVIDER_KEY_ENV:-CUSTOM_API_KEY}"
+  local custom_name="${ACQ_ACTIVE_PROVIDER_NAME:-Custom Provider}"
+  local is_custom=0
+  [ "${ACQ_ACTIVE_PROVIDER:-}" = "custom" ] && [ -n "$custom_base" ] && is_custom=1
+
+  local active_prov="${ACQ_ACTIVE_PROVIDER:-usai}" default_model=""
+  case "$active_prov" in
+    openrouter) default_model="openrouter/openai/gpt-4o" ;;
+    openai)     default_model="openai/gpt-4o" ;;
+    anthropic)  default_model="anthropic/claude-sonnet-4-20250514" ;;
+    gemini)     default_model="google/gemini-2.5-pro" ;;
+  esac
+
+  awk -v has_or="$has_openrouter" -v active_prov="$active_prov" \
+      -v default_model="$default_model" -v is_custom="$is_custom" \
+      -v custom_base="$custom_base" -v custom_env="$custom_env" \
+      -v custom_name="$custom_name" '
+    /^[[:space:]]*"enabled_providers"[[:space:]]*:[[:space:]]*\[[[:space:]]*"usai"[[:space:]]*\][[:space:]]*,?[[:space:]]*$/ { next }
+    /^[[:space:]]*"enabled_providers"[[:space:]]*:[[:space:]]*\[[[:space:]]*$/ {
+      in_ep = 1; ep_buf = $0; next
+    }
+    in_ep {
+      ep_buf = ep_buf "\n" $0
+      if ($0 ~ /\][[:space:]]*,?[[:space:]]*$/) {
+        in_ep = 0
+        if (ep_buf !~ /"usai"/) print ep_buf
+      }
+      next
+    }
+    /^[[:space:]]*"(small_)?model"[[:space:]]*:[[:space:]]*"usai\// {
+      if (active_prov != "usai") {
+        if (default_model != "") {
+          sub(/"usai\/[^"]*"/, "\"" default_model "\"")
+          print
+        } else if ($0 !~ /,[[:space:]]*$/) {
+          print
+        }
+        next
+      }
+    }
+    /^[[:space:]]*"provider"[[:space:]]*:[[:space:]]*\{/ {
+      print
+      if (!injected) {
+        injected = 1
+        if (has_or == 0) {
+          print "    \"openrouter\": {"
+          print "      \"npm\": \"@ai-sdk/openai-compatible\","
+          print "      \"name\": \"OpenRouter\","
+          print "      \"options\": {"
+          print "        \"baseURL\": \"https://openrouter.ai/api/v1\","
+          print "        \"apiKey\": \"{env:OPENROUTER_API_KEY}\""
+          print "      },"
+          print "      \"models\": {"
+          print "        \"openai/gpt-4o\": { \"name\": \"OpenAI: GPT-4o (via OpenRouter)\", \"attachment\": true, \"reasoning\": false, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 128000, \"output\": 16384 } },"
+          print "        \"openai/gpt-4o-mini\": { \"name\": \"OpenAI: GPT-4o Mini (via OpenRouter)\", \"attachment\": true, \"reasoning\": false, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 128000, \"output\": 16384 } },"
+          print "        \"openai/gpt-4.1\": { \"name\": \"OpenAI: GPT-4.1 (via OpenRouter)\", \"attachment\": true, \"reasoning\": false, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 1047576, \"output\": 32768 } },"
+          print "        \"openai/gpt-4.1-mini\": { \"name\": \"OpenAI: GPT-4.1 Mini (via OpenRouter)\", \"attachment\": true, \"reasoning\": false, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 1047576, \"output\": 32768 } },"
+          print "        \"openai/o3\": { \"name\": \"OpenAI: o3 (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": false, \"tool_call\": true, \"limit\": { \"context\": 200000, \"output\": 100000 } },"
+          print "        \"openai/o4-mini\": { \"name\": \"OpenAI: o4-mini (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": false, \"tool_call\": true, \"limit\": { \"context\": 200000, \"output\": 100000 } },"
+          print "        \"openai/gpt-5\": { \"name\": \"OpenAI: GPT-5 (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 400000, \"output\": 128000 } },"
+          print "        \"openai/gpt-5-mini\": { \"name\": \"OpenAI: GPT-5 Mini (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 400000, \"output\": 128000 } },"
+          print "        \"anthropic/claude-sonnet-4\": { \"name\": \"Anthropic: Claude Sonnet 4 (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 200000, \"output\": 64000 } },"
+          print "        \"anthropic/claude-3.7-sonnet\": { \"name\": \"Anthropic: Claude 3.7 Sonnet (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 200000, \"output\": 64000 } },"
+          print "        \"google/gemini-2.5-pro\": { \"name\": \"Google: Gemini 2.5 Pro (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 1048576, \"output\": 65536 } },"
+          print "        \"google/gemini-2.5-flash\": { \"name\": \"Google: Gemini 2.5 Flash (via OpenRouter)\", \"attachment\": true, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 1048576, \"output\": 65536 } },"
+          print "        \"deepseek/deepseek-r1\": { \"name\": \"DeepSeek: R1 (via OpenRouter)\", \"attachment\": false, \"reasoning\": true, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 128000, \"output\": 32768 } },"
+          print "        \"meta-llama/llama-3.3-70b-instruct\": { \"name\": \"Meta: Llama 3.3 70B (via OpenRouter)\", \"attachment\": false, \"reasoning\": false, \"temperature\": true, \"tool_call\": true, \"limit\": { \"context\": 128000, \"output\": 16384 } }"
+          print "      }"
+          print "    },"
+        }
+        if (is_custom == 1) {
+          print "    \"custom\": {"
+          print "      \"npm\": \"@ai-sdk/openai-compatible\","
+          print "      \"name\": \"" custom_name "\","
+          print "      \"options\": {"
+          print "        \"baseURL\": \"" custom_base "\","
+          print "        \"apiKey\": \"{env:" custom_env "}\""
+          print "      }"
+          print "    },"
+        }
+      }
+      next
+    }
+    { print }
+  ' "$oc_jsonc" > "${oc_jsonc}.tmp" && mv -f "${oc_jsonc}.tmp" "$oc_jsonc"
+}
+
+_kit_translate_upgrade_merge_mjs() {
+  local kitdir="$1"
+  local merge_mjs="$kitdir/files/home/usai-config/merge-global-config.mjs"
+  _kit_translate_prepare_orig "$kitdir" "$merge_mjs" || return 0
+  awk '
+    function emit_fixups() {
+      print "if (Array.isArray(merged.enabled_providers) && merged.enabled_providers.length === 1 && merged.enabled_providers[0] === \"usai\") {"
+      print "  delete merged.enabled_providers;"
+      print "}"
+      print "if (template.provider && template.provider.openrouter) {"
+      print "  merged.provider = merged.provider || {};"
+      print "  merged.provider.openrouter = { ...(merged.provider.openrouter || {}), ...template.provider.openrouter, models: { ...((template.provider.openrouter && template.provider.openrouter.models) || {}), ...((merged.provider.openrouter && merged.provider.openrouter.models) || {}) } };"
+      print "}"
+      print "if (typeof merged.model === \"string\" && merged.model.startsWith(\"usai/\") && typeof template.model === \"string\" && !template.model.startsWith(\"usai/\")) {"
+      print "  merged.model = template.model;"
+      print "}"
+      print "if (typeof merged.small_model === \"string\" && merged.small_model.startsWith(\"usai/\") && typeof template.small_model === \"string\" && !template.small_model.startsWith(\"usai/\")) {"
+      print "  merged.small_model = template.small_model;"
+      print "}"
+    }
+    /const merged = deepMerge\(existing, template\);/ {
+      print; emit_fixups(); next
+    }
+    /const merged = \{/ { in_merged = 1 }
+    in_merged && /^[[:space:]]*\};/ {
+      print; in_merged = 0; emit_fixups(); next
+    }
+    { print }
+  ' "$merge_mjs" > "${merge_mjs}.tmp" && mv -f "${merge_mjs}.tmp" "$merge_mjs"
+}
+
+_kit_translate_upgrade_provider_kit() {
+  local kitdir="$1"
+  local oc_jsonc="$kitdir/files/home/usai-config/opencode.jsonc"
+  [ -f "$oc_jsonc" ] || return 0
+  _kit_translate_upgrade_opencode_jsonc "$kitdir"
+  _kit_translate_upgrade_merge_mjs "$kitdir"
+
+  local spec="$kitdir/spec.yaml"
+  if [ -f "$spec" ] && ! grep -q 'openrouter\.ai' "$spec" 2>/dev/null; then
+    local extra_host="${ACQ_ACTIVE_PROVIDER_HOST:-}"
+    awk -v extra_host="$extra_host" '
+      /^[[:space:]]*-[[:space:]]*api\.gsa\.usai\.gov[[:space:]]*$/ {
+        print
+        ind = $0; sub(/-[[:space:]]*api\.gsa\.usai\.gov.*/, "", ind)
+        print ind "- openrouter.ai"
+        print ind "- api.openai.com"
+        print ind "- api.anthropic.com"
+        print ind "- generativelanguage.googleapis.com"
+        if (extra_host != "" && extra_host != "api.gsa.usai.gov" && extra_host != "openrouter.ai" && extra_host != "api.openai.com" && extra_host != "api.anthropic.com" && extra_host != "generativelanguage.googleapis.com") {
+          print ind "- " extra_host
+        }
+        next
+      }
+      { print }
+    ' "$spec" > "${spec}.tmp" && mv -f "${spec}.tmp" "$spec"
+  fi
 }
 
 # ---------------------------------------------------------------------------

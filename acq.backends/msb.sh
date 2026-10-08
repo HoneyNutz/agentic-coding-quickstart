@@ -290,8 +290,8 @@ _acq_msb_service_binding() {
   # must win over the compiled-in usai/github mapping — the sbx backend gives
   # the user's host the same precedence, and a compiled-in short-circuit here
   # silently re-bound a self-hosted token to the default endpoint. Absent
-  # sidecar => compiled-in mapping for usai/github, empty (no binding) for
-  # anything else — prior behavior unchanged.
+  # sidecar => compiled-in mapping for usai/github/built-in LLM providers,
+  # empty (no binding) for anything else — prior behavior unchanged.
   if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
     if _meta=$(acq_secret_meta_resolve "$_service" "$_sandbox" 2>/dev/null) && [ -n "$_meta" ]; then
       _host=$(printf '%s' "$_meta" | cut -f1)
@@ -303,8 +303,18 @@ _acq_msb_service_binding() {
     fi
   fi
   case "$_service" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
-    github) printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
+    usai)       printf '%s\t%s\n' "$USAI_PROVIDER_KEY_ENV" "$ACQ_MSB_USAI_HOST"; return 0 ;;
+    openrouter) printf '%s\t%s\n' "OPENROUTER_API_KEY" "openrouter.ai"; return 0 ;;
+    openai)     printf '%s\t%s\n' "OPENAI_API_KEY" "api.openai.com"; return 0 ;;
+    anthropic)  printf '%s\t%s\n' "ANTHROPIC_API_KEY" "api.anthropic.com"; return 0 ;;
+    gemini)     printf '%s\t%s\n' "GEMINI_API_KEY" "generativelanguage.googleapis.com"; return 0 ;;
+    custom)
+      if [ -n "${ACQ_PROVIDER_KEY_ENV:-}" ] && [ -n "${ACQ_PROVIDER_HOST:-}" ]; then
+        printf '%s\t%s\n' "$ACQ_PROVIDER_KEY_ENV" "$ACQ_PROVIDER_HOST"
+        return 0
+      fi
+      ;;
+    github)     printf '%s\t%s\n' "GITHUB_TOKEN" "$ACQ_MSB_GITHUB_HOST"; return 0 ;;
   esac
   printf '\t\n'
 }
@@ -868,26 +878,38 @@ _acq_msb_bind_one() {
 # `acq secret set SVC --host H --env E` (enumerated from the non-secret sidecar).
 # This mirrors the SCOPE notes at the top of this file; see also
 # _acq_msb_service_binding and _acq_msb_bind_one (the per-service primitive).
+_acq_msb_bind_builtin_provider() {
+  local _arrn="$1" _namesn="$2" _svc="$3" _name="$4" _binding _env _host _val=""
+  _binding=$(_acq_msb_service_binding "$_svc" "$_name")
+  _env=$(printf '%s' "$_binding" | cut -f1)
+  _host=$(printf '%s' "$_binding" | cut -f2)
+  [ -n "$_env" ] && [ -n "$_host" ] || return 0
+  if _acq_msb_bind_one "$_arrn" "$_namesn" "$_svc" "$_name" "$_env" "$_host"; then
+    return 0
+  fi
+  eval "_val=\"\${${_env}:-}\""
+  if [ -z "$_val" ] && [ "$_svc" = "gemini" ] && [ -n "${GOOGLE_API_KEY:-}" ]; then
+    export GEMINI_API_KEY="$GOOGLE_API_KEY"
+    eval "$_namesn+=(\"GEMINI_API_KEY\")"
+    _val="$GOOGLE_API_KEY"
+  fi
+  if [ -n "$_val" ]; then
+    eval "$_arrn+=(--secret \"\${_env}@\${_host}\")"
+    acq_debug "msb secret: binding ${_env}@${_host} (from env)"
+  fi
+}
+
 _acq_msb_bind_secrets_into() {
   local _arrn="$1" _namesn="$2" _name="$3"
 
   if command -v acq_secret_resolve >/dev/null 2>&1; then
-    # usai/github hosts resolve through the SAME binding table set/rm/refeed use
-    # (_acq_msb_service_binding), so a `--host` sidecar recorded at `acq secret
-    # set` overrides the compiled-in endpoint here too (#384) instead of being
-    # written-but-ignored at provision.
-    local _usai_binding _usai_env _usai_host
-    _usai_binding=$(_acq_msb_service_binding usai "$_name")
-    _usai_env=$(printf '%s' "$_usai_binding" | cut -f1)
-    _usai_host=$(printf '%s' "$_usai_binding" | cut -f2)
-
-    # USAi: acq store first, else a pre-exported USAI_API_KEY (e.g. CI).
-    if ! _acq_msb_bind_one "$_arrn" "$_namesn" usai "$_name" "$_usai_env" "$_usai_host"; then
-      if [ -n "${USAI_API_KEY:-}" ]; then
-        eval "$_arrn+=(--secret \"\${_usai_env}@\${_usai_host}\")"
-        acq_debug "msb secret: binding ${_usai_env}@${_usai_host} (from env)"
-      fi
-    fi
+    # Built-in LLM providers resolve through the SAME binding table set/rm/refeed
+    # use (_acq_msb_service_binding), so a `--host` sidecar recorded at `acq secret
+    # set` overrides the compiled-in endpoint here too (#384).
+    local _psvc
+    for _psvc in usai openrouter openai anthropic gemini custom; do
+      _acq_msb_bind_builtin_provider "$_arrn" "$_namesn" "$_psvc" "$_name"
+    done
 
     # GitHub: bind the token to the API and git-transport hosts. acq store first,
     # then a pre-exported GITHUB_TOKEN, then GH_TOKEN (CI). Absent token => no
@@ -908,22 +930,19 @@ _acq_msb_bind_secrets_into() {
       fi
     fi
 
-    # GENERIC custom endpoints. usai + github were bound explicitly above. Any
-    # OTHER service stored via `acq secret set SVC --host H --env E` recorded a
-    # non-secret (host, env) sidecar; bind each such service generically here so
-    # it is no longer stored-but-inert. Iterate the endpoint sidecars for this
-    # sandbox scope + global, deduping by env var (a scoped mapping shadows the
-    # global; usai/github are skipped — already bound).
+    # GENERIC custom endpoints. Built-in providers + github were bound explicitly
+    # above. Any OTHER service stored via `acq secret set SVC --host H --env E`
+    # recorded a non-secret (host, env) sidecar; bind each such service generically
+    # here so it is no longer stored-but-inert.
     if command -v acq_secret_meta_list >/dev/null 2>&1; then
       local _svc _binding _env _host _names_snapshot
       while IFS= read -r _svc; do
         [ -n "$_svc" ] || continue
-        case "$_svc" in usai|github) continue ;; esac  # bound explicitly above
+        case "$_svc" in usai|openrouter|openai|anthropic|gemini|custom|github) continue ;; esac
         _binding=$(_acq_msb_service_binding "$_svc" "$_name")
         _env=$(printf '%s' "$_binding" | cut -f1)
         _host=$(printf '%s' "$_binding" | cut -f2)
         [ -n "$_env" ] && [ -n "$_host" ] || continue
-        # Skip if this env var was already collected (e.g. usai/github, or a dup).
         eval "_names_snapshot=\" \${${_namesn}[*]-} \""
         case "$_names_snapshot" in *" $_env "*) continue ;; esac
         _acq_msb_bind_one "$_arrn" "$_namesn" "$_svc" "$_name" "$_env" "$_host" || true
@@ -5348,7 +5367,7 @@ _acq_msb_secret_set_guidance() {
   # broke both `acq secret set` under a strict shell and the verify-backends
   # seed). The if/then form always leaves a zero status on the false branch.
   case "$service" in
-    usai|github)
+    usai|openrouter|openai|anthropic|gemini|github)
       echo "acq: stored '$service' in the acq secret store." >&2
       if [ "$applied" -gt 0 ]; then
         echo "      Applied to $applied running sandbox(es); no recreate needed." >&2
@@ -5650,18 +5669,21 @@ _acq_msb_secret_ls_binding() {
 # set -g usai` path) + validate. Never places the value on argv. Returns
 # non-zero on failure.
 acq_backend_rotate_key() {
+  local svc="${1:-${ACQ_ACTIVE_PROVIDER:-usai}}"
+  local label="USAi"
+  [ "$svc" = "usai" ] || label="$svc"
   if ! command -v acq_secret_set_interactive >/dev/null 2>&1; then
     echo "acq(msb): internal error: secret store not loaded" >&2
     return 1
   fi
 
-  echo "Rotating the USAi key in the acq secret store (msb backend)." >&2
+  echo "Rotating the ${label} key in the acq secret store (msb backend)." >&2
 
   # Store the new key (TTY/stdin; never argv) and re-feed running sandboxes.
-  # acq_backend_secret_set already stores usai + runs `msb modify --secret` for
-  # every running sandbox, so reuse it rather than duplicating that logic.
-  acq_backend_secret_set -g usai || {
-    echo "acq(msb): failed to store the new USAi key." >&2
+  # acq_backend_secret_set already stores the service + runs `msb modify --secret`
+  # for every running sandbox, so reuse it rather than duplicating that logic.
+  acq_backend_secret_set -g "$svc" || {
+    echo "acq(msb): failed to store the new ${label} key." >&2
     return 1
   }
 
@@ -5677,7 +5699,7 @@ acq_backend_rotate_key() {
   local status=""
   if command -v check_fresh_sandbox_key >/dev/null 2>&1; then
     acq_spin_start "Validating the new key in a temporary sandbox"
-    status=$(check_fresh_sandbox_key)
+    status=$(check_fresh_sandbox_key "$svc")
     acq_spin_stop "Validating the new key in a temporary sandbox"
   fi
 
@@ -5688,13 +5710,13 @@ acq_backend_rotate_key() {
     return 0
   fi
   if [ "$status" = "unreachable" ]; then
-    # The validation request never reached USAi — a network/egress problem, not
+    # The validation request never reached the API — a network/egress problem, not
     # the key. Report it as such (no "double-check the key") via the shared
     # helper when available.
     if command -v _report_usai_unreachable >/dev/null 2>&1; then
-      _report_usai_unreachable
+      _report_usai_unreachable "$svc"
     else
-      echo "acq(msb): could not reach the USAi API to validate — a network/egress" >&2
+      echo "acq(msb): could not reach the ${label} API to validate — a network/egress" >&2
       echo "      problem (proxy/Zscaler/DNS/offline), not the key itself." >&2
     fi
     return 1

@@ -38,6 +38,7 @@
 **.oaistatic.com:443
 **.oaiusercontent.com:443
 **.openai.com:443
+**.openrouter.ai:443
 api.anthropic.com:443
 api.perplexity.ai:443
 api.workos.com:443
@@ -51,6 +52,7 @@ gemini.google.com:443
 generativelanguage.googleapis.com:443
 mcp-proxy.anthropic.com:443
 models.dev:443
+openrouter.ai:443
 platform.claude.com:443
 play.googleapis.com:443
 statsig.anthropic.com:443

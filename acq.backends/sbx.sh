@@ -1118,9 +1118,20 @@ acq_backend_ensure_kits_applied() {
 # Echoes "host1[,host2] <TAB> ENVVAR"; empty for unknown services.
 _acq_service_hosts_env() {
   case "$1" in
-    usai)   printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
-    github) printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
-    *)      printf '\t\n' ;;
+    usai)       printf '%s\t%s\n' "$USAI_PROVIDER_BIND_HOSTS" "$USAI_PROVIDER_KEY_ENV" ;;
+    openrouter) printf 'openrouter.ai\tOPENROUTER_API_KEY\n' ;;
+    gemini)     printf 'generativelanguage.googleapis.com\tGEMINI_API_KEY\n' ;;
+    openai)     printf 'api.openai.com\tOPENAI_API_KEY\n' ;;
+    anthropic)  printf 'api.anthropic.com\tANTHROPIC_API_KEY\n' ;;
+    custom)
+      if [ -n "${ACQ_PROVIDER_HOST:-}" ] && [ -n "${ACQ_PROVIDER_KEY_ENV:-}" ]; then
+        printf '%s\t%s\n' "$ACQ_PROVIDER_HOST" "$ACQ_PROVIDER_KEY_ENV"
+      else
+        printf '\t\n'
+      fi
+      ;;
+    github)     printf 'github.com,api.github.com\tGITHUB_TOKEN\n' ;;
+    *)          printf '\t\n' ;;
   esac
 }
 
@@ -1723,6 +1734,31 @@ acq_backend_key_present() {
       fi
       _acq_sbx_secret_exists -g "" usai "$USAI_PROVIDER_KEY_ENV"
       ;;
+    openrouter|gemini)
+      local _env
+      _env=$(_acq_service_hosts_env "$service" | cut -f2)
+      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" "$service" "$_env"; then
+        return 0
+      fi
+      _acq_sbx_secret_exists -g "" "$service" "$_env"
+      ;;
+    openai|anthropic)
+      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" "$service" ""; then
+        return 0
+      fi
+      _acq_sbx_secret_exists -g "" "$service" ""
+      ;;
+    custom)
+      local _env="${ACQ_PROVIDER_KEY_ENV:-}"
+      if [ -z "$_env" ] && command -v acq_secret_meta_resolve >/dev/null 2>&1; then
+        _env=$(acq_secret_meta_resolve custom "$scope_sandbox" 2>/dev/null | cut -f2 || true)
+      fi
+      [ -n "$_env" ] || return 1
+      if [ -n "$scope_sandbox" ] && _acq_sbx_secret_exists "" "$scope_sandbox" custom "$_env"; then
+        return 0
+      fi
+      _acq_sbx_secret_exists -g "" custom "$_env"
+      ;;
     *)
       return 0
       ;;
@@ -1763,17 +1799,24 @@ _acq_sbx_custom_placeholder() {
 }
 
 # ---------------------------------------------------------------------------
-# acq_backend_rotate_key — rotate the global USAi key (per ADR-0012)
+# acq_backend_rotate_key — rotate the global USAi/provider key (per ADR-0012)
 # ---------------------------------------------------------------------------
-# Rotate the global USAi custom secret in sbx, PRESERVING its proxy
+# Rotate the global provider secret in sbx, PRESERVING its proxy
 # placeholder so existing sandboxes keep resolving to the new value. Carried
 # verbatim from the former scripts/rotate-apikey (which is now a thin shim that
 # calls `acq usai-rotate-api-key`). Never places the secret value on argv — sbx
 # prompts for the new key at its own prompt. Returns non-zero on failure.
 acq_backend_rotate_key() {
+  local svc="${1:-${ACQ_ACTIVE_PROVIDER:-usai}}"
   local usai_host="$USAI_PROVIDER_HOST"
   local usai_models_url="$USAI_PROVIDER_MODELS_URL"
   local usai_env="$USAI_PROVIDER_KEY_ENV"
+  if [ "$svc" != "usai" ]; then
+    acq_provider_apply_active_facts "$svc"
+    usai_host="$ACQ_ACTIVE_PROVIDER_HOST"
+    usai_models_url="$ACQ_ACTIVE_PROVIDER_MODELS_URL"
+    usai_env="$ACQ_ACTIVE_PROVIDER_KEY_ENV"
+  fi
 
   # Read the current secret table once (avoids a TOCTOU window + a second call).
   local secret_ls
@@ -1803,20 +1846,6 @@ acq_backend_rotate_key() {
     | grep -cE "[[:space:]]${usai_env}[[:space:]]" || true)
 
   if [ "${row_count:-0}" -gt 1 ]; then
-    # --- Cleanup path for data corrupted by the pre-fix rotation bug ----------
-    # Only taken when duplicates exist. We must remove every custom secret for
-    # the host and recreate a single one — there's no in-place "dedupe". This is
-    # destructive and non-atomic: between the rm and the set-custom the host has
-    # NO USAi secret, so a Ctrl-C or a failed/cancelled set-custom would leave the
-    # host with no key at all. Guard that window with a trap that prints exact
-    # recovery steps, and disarm it once set-custom succeeds.
-    #
-    # sbx CLI scope/flag change (see docs/VERIFY_BACKENDS_HANDOFF.md "sbx CLI
-    # secret scope-flag change"): GLOBAL is the DEFAULT (no `-g`), and `secret rm`
-    # has NO `--host` flag — a custom secret is removed by its `--placeholder`.
-    # We hold the placeholder already, so remove EACH duplicate row by placeholder
-    # (rm by placeholder targets the one row; loop while any remain), then recreate
-    # a single canonical entry.
     echo "Found $row_count $usai_env entries; consolidating to a single secret." >&2
 
     local _ph="$placeholder" _host="$usai_host" _env="$usai_env"
@@ -1829,9 +1858,6 @@ acq_backend_rotate_key() {
       echo '  sbx secret set-custom --host ${_host} --env ${_env} --placeholder ${_ph}' >&2
     }" EXIT
 
-    # Remove every USAi custom row. Each row's placeholder is re-read from
-    # a fresh listing so we clear duplicates that may share OR differ in
-    # placeholder; -f avoids the confirm prompt, </dev/null guards our stdin.
     local _guard=0 _dup_ph rm_err
     while :; do
       _dup_ph=$(sbx secret ls -g 2>/dev/null \
@@ -1846,8 +1872,6 @@ acq_backend_rotate_key() {
       [ "$_guard" -ge "${row_count:-0}" ] && break
     done
 
-    # Recreate the single secret with the preserved placeholder. Omitting
-    # --value makes sbx prompt for the new key (keeps it out of shell history).
     sbx secret set-custom --host "$usai_host" \
           --env "$usai_env" --placeholder "$placeholder" || {
       echo "acq(sbx): 'sbx secret set-custom' failed. See recovery steps above." >&2
@@ -1856,10 +1880,6 @@ acq_backend_rotate_key() {
 
     trap - EXIT
   else
-    # Healthy single-row case: set-custom updates the existing entry in place, so
-    # there's no need for the destructive rm (which would only add risk here).
-    # Omitting --value makes sbx prompt for the new key (no shell-history leak).
-    # Global is the default (no `-g`); see the CLI-change note above.
     sbx secret set-custom --host "$usai_host" \
           --env "$usai_env" --placeholder "$placeholder" || {
       echo "acq(sbx): 'sbx secret set-custom' failed." >&2
@@ -1872,19 +1892,10 @@ acq_backend_rotate_key() {
     return 0
   fi
 
-  # Validate the new key in a throwaway sandbox so we don't depend on any
-  # particular pre-existing sandbox. Created here, removed on exit.
   local validation_sbx="acq-keycheck-$$"
   # shellcheck disable=SC2064
   trap "sbx rm '$validation_sbx' -f >/dev/null 2>&1 || true" EXIT
 
-  # `sbx create` needs an authenticated sbx session. If it has expired, sbx
-  # triggers an interactive browser login — and if its output is swallowed and
-  # it's unbounded, rotation appears to hang with no explanation (quickstart
-  # #211). Two guards: (1) do NOT silence stderr, so any login prompt is
-  # visible; (2) bound the create with a timeout so an interactive-login
-  # handshake can never hang indefinitely. sbx has no non-interactive
-  # auth-status probe, so the timeout is the safety net.
   local create_timeout="${ROTATE_VALIDATE_TIMEOUT:-120}"
   local rc=0
   acq_spin_start "Validating the new key in a temporary sandbox"
@@ -1907,10 +1918,17 @@ acq_backend_rotate_key() {
   fi
 
   local status
-  status=$(sbx exec "$validation_sbx" -- sh -c \
-     "curl -sS -o /dev/null -w '%{http_code}' \
-      -H \"Authorization: Bearer \$${usai_env}\" \
-      $usai_models_url" 2>/dev/null || true)
+  if [ "$svc" = "anthropic" ]; then
+    status=$(sbx exec "$validation_sbx" -- sh -c \
+       "curl -sS -o /dev/null -w '%{http_code}' \
+        -H \"x-api-key: \$${usai_env}\" -H \"anthropic-version: 2023-06-01\" \
+        $usai_models_url" 2>/dev/null || true)
+  else
+    status=$(sbx exec "$validation_sbx" -- sh -c \
+       "curl -sS -o /dev/null -w '%{http_code}' \
+        -H \"Authorization: Bearer \$${usai_env}\" \
+        $usai_models_url" 2>/dev/null || true)
+  fi
 
   acq_backend_terminate "$validation_sbx" >/dev/null 2>&1 || true
   trap - EXIT

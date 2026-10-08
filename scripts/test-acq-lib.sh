@@ -600,7 +600,10 @@ KEYGENSTUB
   # ACQ_EXTRA_KITS changes _build_kit_list's output (and, pre-#381, triggered
   # the split_noglob errexit loss), making local test runs diverge from CI.
   # Tests that exercise extras set these themselves.
-  unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES
+  unset ACQ_EXTRA_KITS ACQ_EXTRA_KIT_SOURCES \
+    ACQ_PROVIDER ACQ_PROVIDER_FLAG ACQ_PROVIDER_HOST ACQ_PROVIDER_BASE_URL \
+    ACQ_PROVIDER_MODELS_URL ACQ_PROVIDER_KEY_ENV ACQ_PROVIDER_KEY_MGMT_URL \
+    OPENROUTER_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GEMINI_API_KEY GOOGLE_API_KEY
 }
 
 cleanup_stubs() { [ -n "${STUBDIR:-}" ] && rm -rf "$STUBDIR"; }

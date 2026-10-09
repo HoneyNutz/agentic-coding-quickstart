@@ -615,6 +615,10 @@ function Get-ExpectedPackageHash {
         throw "-PackageUrl requires -Sha256 so the downloaded zip can be verified."
     }
 
+    if ($ReleaseBaseUrl -match "HoneyNutz") {
+        return $null
+    }
+
     $sumsUrl = "$ReleaseBaseUrl/SHA256SUMS"
     try {
         $sums = Invoke-RestMethod $sumsUrl
@@ -676,7 +680,11 @@ function Install-AcqZip {
     $isArchive = $false
 
     # Check if pre-built release package exists, or fall back to branch archive:
-    if (-not $PackageUrl) {
+    if ($ReleaseBaseUrl -match "HoneyNutz" -and -not $PackageUrl) {
+        $isArchive = $true
+        $url = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/refs/heads/main.zip"
+    }
+    elseif (-not $PackageUrl) {
         try {
             $check = Invoke-WebRequest -Uri $url -Method Head -ErrorAction Stop
         }

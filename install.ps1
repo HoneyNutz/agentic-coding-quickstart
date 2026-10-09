@@ -616,7 +616,24 @@ function Get-ExpectedPackageHash {
     }
 
     $sumsUrl = "$ReleaseBaseUrl/SHA256SUMS"
-    $sums = Invoke-RestMethod $sumsUrl
+    $sums = $null
+    try {
+        $sums = Invoke-RestMethod $sumsUrl
+    }
+    catch {
+        if ($ReleaseBaseUrl -notmatch 'GSA-TTS') {
+            $upstreamSumsUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/SHA256SUMS"
+            try {
+                $sums = Invoke-RestMethod $upstreamSumsUrl
+            }
+            catch {
+                throw "Could not retrieve SHA256SUMS from $sumsUrl or $upstreamSumsUrl: $_"
+            }
+        }
+        else {
+            throw $_
+        }
+    }
     foreach ($line in ($sums -split "`n")) {
         if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
             return $Matches[1].ToLowerInvariant()
@@ -628,8 +645,13 @@ function Get-ExpectedPackageHash {
 
 function Install-AcqZip {
     # If install.ps1 is executed directly from a local clone of the repository:
-    $localRepoRoot = Split-Path -Parent $PSCommandPath
-    if (-not $localRepoRoot) { $localRepoRoot = $PSScriptRoot }
+    $localRepoRoot = ""
+    if ($PSCommandPath) {
+        $localRepoRoot = Split-Path -Parent $PSCommandPath
+    }
+    elseif ($PSScriptRoot) {
+        $localRepoRoot = $PSScriptRoot
+    }
     if ($localRepoRoot -and (Test-Path -LiteralPath (Join-Path $localRepoRoot "acq") -PathType Leaf) -and -not $PackageUrl) {
         Write-Host "  Installing acq from local repository ($localRepoRoot)"
         Invoke-InstallCommand "copy acq from $localRepoRoot to $InstallDir" {

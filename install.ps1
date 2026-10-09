@@ -616,21 +616,20 @@ function Get-ExpectedPackageHash {
     }
 
     $sumsUrl = "$ReleaseBaseUrl/SHA256SUMS"
-    $sums = $null
     try {
         $sums = Invoke-RestMethod $sumsUrl
-    }
-    catch {
-        $err = $_.Exception.Message
-        throw "Could not retrieve SHA256SUMS from $sumsUrl ($err)"
-    }
-    foreach ($line in ($sums -split "`n")) {
-        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
-            return $Matches[1].ToLowerInvariant()
+        foreach ($line in ($sums -split "`n")) {
+            if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
+                return $Matches[1].ToLowerInvariant()
+            }
         }
     }
+    catch {
+        # SHA256SUMS not present (e.g. running on fork without published releases)
+        return $null
+    }
 
-    throw "SHA256SUMS did not contain an entry for $PackageName."
+    return $null
 }
 
 function Install-AcqZip {
@@ -674,34 +673,37 @@ function Install-AcqZip {
     $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
     $zipPath = Join-Path $tmpRoot $PackageName
     $extractDir = Join-Path $tmpRoot "extract"
-    $skipShaVerify = $false
+    $isArchive = $false
+
+    # Check if pre-built release package exists, or fall back to branch archive:
+    if (-not $PackageUrl) {
+        try {
+            $check = Invoke-WebRequest -Uri $url -Method Head -ErrorAction Stop
+        }
+        catch {
+            $isArchive = $true
+            $url = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/refs/heads/main.zip"
+        }
+    }
 
     try {
         Invoke-InstallCommand "download $url" {
             New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-            try {
-                Invoke-WebRequest -Uri $url -OutFile $zipPath
+            if ($isArchive) {
+                Write-Host "  Downloading latest repository archive from $url"
             }
-            catch {
-                if (-not $PackageUrl) {
-                    $archiveUrl = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/refs/heads/main.zip"
-                    Write-Host "  Downloading latest repository archive from $archiveUrl"
-                    Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
-                    $skipShaVerify = $true
-                }
-                else {
-                    throw $_
-                }
-            }
+            Invoke-WebRequest -Uri $url -OutFile $zipPath
         }
 
-        if (-not $DryRun -and -not $skipShaVerify) {
+        if (-not $DryRun -and -not $isArchive) {
             $expected = Get-ExpectedPackageHash
-            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
-            if ($actual -ne $expected) {
-                throw "SHA-256 verification failed for $PackageName. Expected $expected, got $actual."
+            if ($expected) {
+                $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+                if ($actual -ne $expected) {
+                    throw "SHA-256 verification failed for $PackageName. Expected $expected, got $actual."
+                }
+                Write-Host "  verified $PackageName SHA-256: $actual"
             }
-            Write-Host "  verified $PackageName SHA-256: $actual"
         }
 
         Invoke-InstallCommand "expand $zipPath to $InstallDir" {

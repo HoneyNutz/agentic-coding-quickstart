@@ -580,19 +580,21 @@ acq_provider_apply_active_facts() {
       ;;
     *)
       # Custom provider ("custom" or a user-named custom service).
-      local chost="" cbase="" cmodels="" cenv="" cmgmt="" meta=""
+      local chost="" cbase="" cmodels="" cenv="" cmgmt="" cmodel="" meta=""
       if command -v _acq_config_read_field >/dev/null 2>&1; then
         chost=$(_acq_config_read_field provider_host)
         cbase=$(_acq_config_read_field provider_base_url)
         cmodels=$(_acq_config_read_field provider_models_url)
         cenv=$(_acq_config_read_field provider_key_env)
         cmgmt=$(_acq_config_read_field provider_key_mgmt_url)
+        cmodel=$(_acq_config_read_field provider_model)
       fi
       [ -n "${ACQ_PROVIDER_HOST:-}" ] && chost="$ACQ_PROVIDER_HOST"
       [ -n "${ACQ_PROVIDER_BASE_URL:-}" ] && cbase="$ACQ_PROVIDER_BASE_URL"
       [ -n "${ACQ_PROVIDER_MODELS_URL:-}" ] && cmodels="$ACQ_PROVIDER_MODELS_URL"
       [ -n "${ACQ_PROVIDER_KEY_ENV:-}" ] && cenv="$ACQ_PROVIDER_KEY_ENV"
       [ -n "${ACQ_PROVIDER_KEY_MGMT_URL:-}" ] && cmgmt="$ACQ_PROVIDER_KEY_MGMT_URL"
+      [ -n "${ACQ_PROVIDER_MODEL:-}" ] && cmodel="$ACQ_PROVIDER_MODEL"
       if command -v acq_secret_meta_resolve >/dev/null 2>&1; then
         meta=$(acq_secret_meta_resolve "$prov" "$scope_sandbox" 2>/dev/null || true)
         if [ -n "$meta" ]; then
@@ -611,13 +613,14 @@ acq_provider_apply_active_facts() {
       ACQ_ACTIVE_PROVIDER_MODELS_URL="$cmodels"
       ACQ_ACTIVE_PROVIDER_KEY_ENV="$cenv"
       ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL="$cmgmt"
+      ACQ_ACTIVE_PROVIDER_MODEL="$cmodel"
       ACQ_ACTIVE_PROVIDER_BIND_HOSTS="$chost"
       ;;
   esac
   export ACQ_ACTIVE_PROVIDER ACQ_ACTIVE_PROVIDER_NAME ACQ_ACTIVE_PROVIDER_HOST \
          ACQ_ACTIVE_PROVIDER_BASE_URL ACQ_ACTIVE_PROVIDER_MODELS_URL \
          ACQ_ACTIVE_PROVIDER_KEY_ENV ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL \
-         ACQ_ACTIVE_PROVIDER_BIND_HOSTS
+         ACQ_ACTIVE_PROVIDER_MODEL ACQ_ACTIVE_PROVIDER_BIND_HOSTS
 }
 
 # _acq_import_detect_var SERVICE -> prints the NAME of the FIRST of SERVICE's
@@ -3399,8 +3402,34 @@ ensure_key_present() {
     return 1
   fi
 
+  local explicit_prov=""
+  if command -v _acq_config_read_field >/dev/null 2>&1; then
+    explicit_prov=$(_acq_config_read_field provider)
+  fi
+  [ -n "${ACQ_PROVIDER:-}" ] && explicit_prov="$ACQ_PROVIDER"
+
   if [ ! -t 0 ]; then
-    echo "acq: no ${pname} API key stored; set one with 'acq secret set -g ${svc}' (see $pmgmt). Aborting." >&2
+    if [ -n "$explicit_prov" ]; then
+      echo "acq: no ${pname} API key stored; set one with 'acq secret set -g ${svc}' (see $pmgmt). Aborting." >&2
+    else
+      echo "acq: no LLM API key stored; configure one with 'acq configure --provider <name>' or 'acq secret set -g <service>'. Aborting." >&2
+    fi
+    return 1
+  fi
+
+  if [ -z "$explicit_prov" ]; then
+    echo >&2
+    echo "No LLM provider or API key is configured yet." >&2
+    _acq_configure_provider || return 1
+    acq_provider_apply_active_facts "$scope_sandbox"
+    svc="${ACQ_ACTIVE_PROVIDER:-usai}"
+    pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+    penv="${ACQ_ACTIVE_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+    pmgmt="${ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL:-$USAI_PROVIDER_KEY_MGMT_URL}"
+    if acq_secret_has "$svc" "$scope_sandbox"; then
+      return 0
+    fi
+    echo "No ${pname} API key was stored. Aborting." >&2
     return 1
   fi
 
@@ -3408,13 +3437,22 @@ ensure_key_present() {
   echo "No ${pname} API key is stored yet." >&2
   if [ "$svc" = "usai" ]; then
     echo "USAi keys are created at $pmgmt and expire every 7 days." >&2
+  elif [ "$svc" = "custom" ]; then
+    echo "Custom provider uses endpoint '${ACQ_ACTIVE_PROVIDER_BASE_URL:-localhost}'." >&2
   else
     echo "${pname} keys are managed at $pmgmt." >&2
   fi
   echo >&2
   echo "To set one:" >&2
-  echo "  1. Open $pmgmt" >&2
-  echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
+  if [ "$svc" = "usai" ]; then
+    echo "  1. Open $pmgmt" >&2
+    echo "  2. Create a key (or copy an existing one) with the console copy button" >&2
+  elif [ "$svc" = "custom" ]; then
+    echo "  1. Set your custom endpoint API key for env ${penv}" >&2
+  else
+    echo "  1. Open $pmgmt" >&2
+    echo "  2. Create or copy a valid ${pname} API key" >&2
+  fi
   echo >&2
 
   if ! command -v acq_backend_secret_set >/dev/null 2>&1; then
@@ -3738,15 +3776,16 @@ acq_print_doctor() {
 # _acq_configure_show_current — print the current durable configuration
 # (config.yaml) to stderr, so `acq configure` opens by showing what is in effect.
 _acq_configure_show_current() {
-  local cfg backend provider extras scope
+  local cfg backend provider model extras scope
   cfg=$(_acq_config_file)
   backend=$(_acq_config_read_field backend)
   provider=$(_acq_config_read_field provider)
+  model=$(_acq_config_read_field provider_model)
   extras=$(_acq_config_read_field extra_kits)
   scope=$(_acq_config_read_field scope_github_token)
   echo "acq: current configuration (${cfg}):" >&2
   echo "      default backend:    ${backend:-<auto-detect>}" >&2
-  echo "      llm provider:       ${provider:-<auto-detect>}" >&2
+  echo "      llm provider:       ${provider:-<auto-detect>}${model:+ (model: $model)}" >&2
   echo "      extra kits:         ${extras:-<none>}" >&2
   echo "      scope GitHub token: ${scope:-no}" >&2
   echo "" >&2
@@ -3754,9 +3793,9 @@ _acq_configure_show_current() {
 
 # _acq_configure_provider [ARGS...] — configure the default generative LLM
 # provider (built-in preset: usai, openrouter, openai, anthropic, gemini; or
-# custom endpoint with --host / --base-url / --models-url / --env).
+# custom endpoint with --host / --base-url / --models-url / --model / --env).
 _acq_configure_provider() {
-  local prov="" chost="" cbase="" cmodels="" cenv="" cmgmt=""
+  local prov="" chost="" cbase="" cmodels="" cmodel="" cenv="" cmgmt=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --provider)   prov="${2:-}"; shift ;;
@@ -3767,6 +3806,8 @@ _acq_configure_provider() {
       --base-url=*) cbase="${1#--base-url=}" ;;
       --models-url) cmodels="${2:-}"; shift ;;
       --models-url=*) cmodels="${1#--models-url=}" ;;
+      --model)      cmodel="${2:-}"; shift ;;
+      --model=*)    cmodel="${1#--model=}" ;;
       --env)        cenv="${2:-}"; shift ;;
       --env=*)      cenv="${1#--env=}" ;;
       --key-mgmt-url) cmgmt="${2:-}"; shift ;;
@@ -3783,26 +3824,27 @@ _acq_configure_provider() {
   done
 
   if [ -z "$prov" ]; then
-    if [ ! -t 0 ]; then
-      echo "acq: configure --provider requires a provider name (usai, openrouter, openai, anthropic, gemini, custom)." >&2
-      return 1
+    echo "How do you want to access LLM keys?" >&2
+    echo "  1) USAi       (GSA USAi — api.gsa.usai.gov)" >&2
+    echo "  2) OpenRouter (OpenRouter — openrouter.ai)" >&2
+    echo "  3) OpenAI     (OpenAI — api.openai.com)" >&2
+    echo "  4) Anthropic  (Anthropic — api.anthropic.com)" >&2
+    echo "  5) Gemini     (Google Gemini — generativelanguage.googleapis.com)" >&2
+    echo "  6) Custom Key (Custom OpenAI-compatible endpoint)" >&2
+    printf "Selection [1-6, default usai]: " >&2
+    if ! read -r prov; then
+      if [ ! -t 0 ]; then
+        echo "acq: configure --provider requires a provider name (usai, openrouter, openai, anthropic, gemini, custom)." >&2
+        return 1
+      fi
     fi
-    echo "Select default LLM provider:" >&2
-    echo "  1) usai       (GSA USAi — api.gsa.usai.gov)" >&2
-    echo "  2) openrouter (OpenRouter — openrouter.ai)" >&2
-    echo "  3) openai     (OpenAI — api.openai.com)" >&2
-    echo "  4) anthropic  (Anthropic — api.anthropic.com)" >&2
-    echo "  5) gemini     (Google Gemini — generativelanguage.googleapis.com)" >&2
-    echo "  6) custom     (Custom OpenAI-compatible endpoint)" >&2
-    printf "Provider [usai]: " >&2
-    read -r prov || true
     case "$prov" in
-      ""|1|usai)       prov="usai" ;;
-      2|openrouter)    prov="openrouter" ;;
-      3|openai)        prov="openai" ;;
-      4|anthropic)     prov="anthropic" ;;
-      5|gemini)        prov="gemini" ;;
-      6|custom)        prov="custom" ;;
+      ""|1|[uU][sS][aA][iI])               prov="usai" ;;
+      2|[oO][pP][eE][nN][rR][oO][uU][tT]*) prov="openrouter" ;;
+      3|[oO][pP][eE][nN][aA][iI])          prov="openai" ;;
+      4|[aA][nN][tT][hH][rR][oO][pP][iI][cC]) prov="anthropic" ;;
+      5|[gG][eE][mM][iI][nN][iI])          prov="gemini" ;;
+      6|[cC][uU][sS][tT][oO][mM]*)         prov="custom" ;;
     esac
   fi
 
@@ -3813,28 +3855,70 @@ _acq_configure_provider() {
       ;;
   esac
 
-  if [ "$prov" = "custom" ] && [ -z "$chost" ] && [ -t 0 ]; then
-    printf "Custom endpoint host (e.g. llm.example.com): " >&2
-    read -r chost || true
-    printf "Custom base URL [https://%s/v1]: " "${chost:-localhost}" >&2
-    read -r cbase || true
-    printf "Custom API key env var [CUSTOM_API_KEY]: " >&2
-    read -r cenv || true
+  if [ "$prov" = "custom" ]; then
+    if [ -z "$cbase" ] || [ -z "$cmodel" ]; then
+      echo >&2
+      echo "Custom OpenAI-compatible endpoint configuration:" >&2
+      if [ -z "$cbase" ]; then
+        printf "  Endpoint URI / Base URL (e.g. https://api.together.xyz/v1): " >&2
+        read -r cbase || true
+      fi
+      if [ -z "$chost" ] && [ -n "$cbase" ]; then
+        chost="${cbase#*://}"
+        chost="${chost%%/*}"
+        chost="${chost%%:*}"
+      fi
+      if [ -z "$cmodel" ]; then
+        printf "  Model name (e.g. llama-3.3-70b-instruct): " >&2
+        read -r cmodel || true
+      fi
+      if [ -z "$cenv" ]; then
+        cenv="CUSTOM_API_KEY"
+      fi
+    fi
   fi
 
   _acq_config_write_field provider "$prov"
-  if [ "$prov" = "custom" ] || [ -n "$chost" ] || [ -n "$cbase" ] || [ -n "$cmodels" ] || [ -n "$cenv" ] || [ -n "$cmgmt" ]; then
+  if [ "$prov" = "custom" ] || [ -n "$chost" ] || [ -n "$cbase" ] || [ -n "$cmodels" ] || [ -n "$cmodel" ] || [ -n "$cenv" ] || [ -n "$cmgmt" ]; then
     [ -n "$chost" ]   && _acq_config_write_field provider_host "$chost"
     [ -n "$cbase" ]   && _acq_config_write_field provider_base_url "$cbase"
     [ -n "$cmodels" ] && _acq_config_write_field provider_models_url "$cmodels"
+    [ -n "$cmodel" ]  && _acq_config_write_field provider_model "$cmodel"
     [ -n "$cenv" ]    && _acq_config_write_field provider_key_env "$cenv"
     [ -n "$cmgmt" ]   && _acq_config_write_field provider_key_mgmt_url "$cmgmt"
   fi
   acq_provider_apply_active_facts
   echo "acq: configured LLM provider '${prov}' in $(_acq_config_file)." >&2
   echo "      endpoint host: ${ACQ_ACTIVE_PROVIDER_HOST}" >&2
+  [ -n "${ACQ_ACTIVE_PROVIDER_MODEL:-}" ] && echo "      model:         ${ACQ_ACTIVE_PROVIDER_MODEL}" >&2
   echo "      api key env:   ${ACQ_ACTIVE_PROVIDER_KEY_ENV}" >&2
   echo "      store key via: acq secret set -g ${prov}" >&2
+
+  if [ -t 0 ] && command -v acq_backend_secret_set >/dev/null 2>&1; then
+    echo >&2
+    if [ "$prov" = "usai" ]; then
+      echo "USAi keys are created at $ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2
+    elif [ "$prov" = "custom" ]; then
+      echo "Custom provider uses endpoint '${cbase:-https://${chost:-localhost}/v1}' (host: ${chost:-localhost}, model: ${cmodel:-default})." >&2
+    else
+      echo "${ACQ_ACTIVE_PROVIDER_NAME} keys are managed at $ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL." >&2
+    fi
+    local answer=""
+    printf 'Have your %s API key ready to paste? Set it now? [y/N] ' "${ACQ_ACTIVE_PROVIDER_NAME:-$prov}" >&2
+    read -r answer || true
+    case "$answer" in
+      [yY]|[yY][eE][sS])
+        if acq_is_known_provider "$prov" && [ "$prov" != "custom" ]; then
+          acq_backend_secret_set -g "$prov" || true
+        else
+          acq_backend_secret_set -g "$prov" --host "${chost:-localhost}" --env "${cenv:-CUSTOM_API_KEY}" || true
+        fi
+        ;;
+      *)
+        echo "Key setup skipped. You can set it later via 'acq secret set -g ${prov}'." >&2
+        ;;
+    esac
+  fi
   return 0
 }
 

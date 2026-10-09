@@ -208,3 +208,92 @@ MJS
   assert_output "200"
   assert_regex "$(cat "$CALLS")" 'x-api-key: \$ANTHROPIC_API_KEY.*anthropic-version: 2023-06-01.*https://api\.anthropic\.com/v1/models'
 }
+
+@test "configure: interactive provider selection presents 6 options and custom URI/model prompts" {
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_BACKEND=sbx
+    export XDG_CONFIG_HOME="'"$STUBDIR"'/xdg-custom"
+    . "'"$REPO_ROOT"'/acq.backends/common.sh"
+    printf "6\nhttps://my-llm.example.org/v1\nmy-custom-model\nn\n" | _acq_configure_provider
+  '
+  assert_success
+  assert_output --partial "How do you want to access LLM keys?"
+  assert_output --partial "1) USAi"
+  assert_output --partial "2) OpenRouter"
+  assert_output --partial "3) OpenAI"
+  assert_output --partial "4) Anthropic"
+  assert_output --partial "5) Gemini"
+  assert_output --partial "6) Custom Key"
+  assert_output --partial "Endpoint URI / Base URL"
+  assert_output --partial "Model name"
+  assert_output --partial "endpoint host: my-llm.example.org"
+  assert_output --partial "model:         my-custom-model"
+
+  load_acq
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-custom"
+  assert_equal "$(_acq_config_read_field provider)" "custom"
+  assert_equal "$(_acq_config_read_field provider_host)" "my-llm.example.org"
+  assert_equal "$(_acq_config_read_field provider_base_url)" "https://my-llm.example.org/v1"
+  assert_equal "$(_acq_config_read_field provider_model)" "my-custom-model"
+}
+
+@test "kit-translate: custom provider with model renders custom/<model> in opencode.jsonc" {
+  load_acq
+  local kitdir="$STUBDIR/mock-custom-kit"
+  mkdir -p "$kitdir/files/home/usai-config"
+  cat > "$kitdir/spec.yaml" <<'YAML'
+schemaVersion: "hybrid/v1"
+kind: mixin
+name: usai-provider
+displayName: USAi Provider
+description: test
+caps:
+  network:
+    mode: balanced
+    allow:
+      - api.gsa.usai.gov
+YAML
+  cat > "$kitdir/files/home/usai-config/opencode.jsonc" <<'JSONC'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "usai/claude-haiku-4-5",
+  "enabled_providers": ["usai"],
+  "provider": {
+    "usai": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "USAi",
+      "options": {
+        "baseURL": "https://api.gsa.usai.gov/api/v1",
+        "apiKey": "{env:USAI_API_KEY}"
+      }
+    }
+  }
+}
+JSONC
+  cat > "$kitdir/files/home/usai-config/merge-global-config.mjs" <<'MJS'
+const kit = JSON.parse('{}');
+const merged = {
+  ...existing,
+  model: existing.model ?? kit.model,
+  enabled_providers: existing.enabled_providers ?? kit.enabled_providers,
+  provider: {},
+};
+MJS
+
+  export ACQ_ACTIVE_PROVIDER=custom
+  export ACQ_ACTIVE_PROVIDER_BASE_URL="https://my-llm.example.org/v1"
+  export ACQ_ACTIVE_PROVIDER_HOST="my-llm.example.org"
+  export ACQ_ACTIVE_PROVIDER_MODEL="llama-3.3-70b-instruct"
+  export ACQ_ACTIVE_PROVIDER_KEY_ENV="CUSTOM_API_KEY"
+
+  _kit_translate_upgrade_provider_kit "$kitdir"
+
+  run grep -c '"model": "custom/llama-3.3-70b-instruct"' "$kitdir/files/home/usai-config/opencode.jsonc"
+  assert_output "1"
+  run grep -c '"custom": {' "$kitdir/files/home/usai-config/opencode.jsonc"
+  assert_output "1"
+  run grep -c '"llama-3.3-70b-instruct": {' "$kitdir/files/home/usai-config/opencode.jsonc"
+  assert_output "1"
+}
+

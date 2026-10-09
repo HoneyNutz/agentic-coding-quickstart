@@ -1066,9 +1066,14 @@ acq_secret_set_interactive() {
     # "secret" (which in this project means the sbx/msb credential-injection
     # concept). Prompt with the friendlier term for the well-known services.
     case "$service" in
-      usai)   printf 'Enter USAi API key: ' >&2 ;;
-      github) printf 'Enter GitHub token: ' >&2 ;;
-      *)      printf 'Enter %s API key: ' "$service" >&2 ;;
+      usai)       printf 'Enter USAi API key: ' >&2 ;;
+      github)     printf 'Enter GitHub token: ' >&2 ;;
+      openrouter) printf 'Enter OpenRouter API key: ' >&2 ;;
+      openai)     printf 'Enter OpenAI API key: ' >&2 ;;
+      anthropic)  printf 'Enter Anthropic API key: ' >&2 ;;
+      gemini)     printf 'Enter Google Gemini API key: ' >&2 ;;
+      custom)     printf 'Enter Custom API key: ' >&2 ;;
+      *)          printf 'Enter %s API key: ' "$service" >&2 ;;
     esac
     value=$(_acq_read_secret_masked)
     printf '\n' >&2

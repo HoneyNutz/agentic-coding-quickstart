@@ -196,6 +196,7 @@ _kit_translate_upgrade_opencode_jsonc() {
   local custom_base="${ACQ_ACTIVE_PROVIDER_BASE_URL:-}"
   local custom_env="${ACQ_ACTIVE_PROVIDER_KEY_ENV:-CUSTOM_API_KEY}"
   local custom_name="${ACQ_ACTIVE_PROVIDER_NAME:-Custom Provider}"
+  local custom_model="${ACQ_ACTIVE_PROVIDER_MODEL:-}"
   local is_custom=0
   [ "${ACQ_ACTIVE_PROVIDER:-}" = "custom" ] && [ -n "$custom_base" ] && is_custom=1
 
@@ -205,12 +206,13 @@ _kit_translate_upgrade_opencode_jsonc() {
     openai)     default_model="openai/gpt-4o" ;;
     anthropic)  default_model="anthropic/claude-sonnet-4-20250514" ;;
     gemini)     default_model="google/gemini-2.5-pro" ;;
+    custom)     default_model="custom/${custom_model:-default}" ;;
   esac
 
   awk -v has_or="$has_openrouter" -v active_prov="$active_prov" \
       -v default_model="$default_model" -v is_custom="$is_custom" \
       -v custom_base="$custom_base" -v custom_env="$custom_env" \
-      -v custom_name="$custom_name" '
+      -v custom_name="$custom_name" -v custom_model="$custom_model" '
     /^[[:space:]]*"enabled_providers"[[:space:]]*:[[:space:]]*\[[[:space:]]*"usai"[[:space:]]*\][[:space:]]*,?[[:space:]]*$/ { next }
     /^[[:space:]]*"enabled_providers"[[:space:]]*:[[:space:]]*\[[[:space:]]*$/ {
       in_ep = 1; ep_buf = $0; next
@@ -271,6 +273,13 @@ _kit_translate_upgrade_opencode_jsonc() {
           print "      \"options\": {"
           print "        \"baseURL\": \"" custom_base "\","
           print "        \"apiKey\": \"{env:" custom_env "}\""
+          print "      },"
+          print "      \"models\": {"
+          if (custom_model != "") {
+            print "        \"" custom_model "\": { \"name\": \"" custom_model "\", \"attachment\": true, \"tool_call\": true }"
+          } else {
+            print "        \"default\": { \"name\": \"Default Model\", \"attachment\": true, \"tool_call\": true }"
+          }
           print "      }"
           print "    },"
         }
@@ -293,6 +302,10 @@ _kit_translate_upgrade_merge_mjs() {
       print "if (template.provider && template.provider.openrouter) {"
       print "  merged.provider = merged.provider || {};"
       print "  merged.provider.openrouter = { ...(merged.provider.openrouter || {}), ...template.provider.openrouter, models: { ...((template.provider.openrouter && template.provider.openrouter.models) || {}), ...((merged.provider.openrouter && merged.provider.openrouter.models) || {}) } };"
+      print "}"
+      print "if (template.provider && template.provider.custom) {"
+      print "  merged.provider = merged.provider || {};"
+      print "  merged.provider.custom = { ...(merged.provider.custom || {}), ...template.provider.custom, models: { ...((template.provider.custom && template.provider.custom.models) || {}), ...((merged.provider.custom && merged.provider.custom.models) || {}) } };"
       print "}"
       print "if (typeof merged.model === \"string\" && merged.model.startsWith(\"usai/\") && typeof template.model === \"string\" && !template.model.startsWith(\"usai/\")) {"
       print "  merged.model = template.model;"

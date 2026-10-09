@@ -1165,8 +1165,8 @@ case "$subcommand" in
     local_name=$(derive_name "$@") || exit 1
     [ -n "$local_name" ] || { echo "acq: could not determine sandbox name" >&2; exit 1; }
 
-    # The USAi API key must be stored before provisioning: msb binds secrets only
-    # at create time, so a sandbox created before the key exists carries no USAi
+    # The LLM provider API key must be stored before provisioning: msb binds secrets only
+    # at create time, so a sandbox created before the key exists carries no provider
     # binding. Gate on key presence first (fail closed if declined) so create
     # picks it up. `create` is otherwise detached and never attaches.
     if ! ensure_key_present "$local_name"; then
@@ -1174,7 +1174,7 @@ case "$subcommand" in
     fi
 
     # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for the
-    # same reason as the USAi gate above: msb binds secrets only at create time
+    # same reason as the provider key gate above: msb binds secrets only at create time
     # (--secret ENV@HOST), so a GitHub token stored AFTER create would never bind
     # to this sandbox. Prompting first lets a supplied token be picked up at
     # create. Warn-not-block (ADR-0013): declining never aborts the create, it
@@ -1186,7 +1186,7 @@ case "$subcommand" in
 
     acq_backend_provision "$local_name" "$@"
 
-    # Non-blocking USAi key advisory. `create` is detached and never attaches,
+    # Non-blocking LLM provider key advisory. `create` is detached and never attaches,
     # so unlike `run` we don't gate on the key or offer interactive rotation —
     # just warn if it's already invalid so a create-only user knows before they
     # later `acq run`.
@@ -1302,7 +1302,7 @@ case "$subcommand" in
         fi
 
         # Nudge toward a per-sandbox scoped GitHub token BEFORE provisioning, for
-        # the SAME reason as the USAi gate: msb binds secrets only at create time
+        # the SAME reason as the provider key gate: msb binds secrets only at create time
         # (--secret ENV@HOST), so a token stored AFTER create would never bind to
         # this sandbox. Prompting first lets a supplied token be picked up at
         # create. Warn-not-block (ADR-0013): declining never aborts, it just
@@ -1314,7 +1314,7 @@ case "$subcommand" in
         acq_backend_provision "$local_name" "${create_args[@]}"
       fi
 
-      # Validate USAi key before attaching. This gate must fail closed, so
+      # Validate LLM provider key before attaching. This gate must fail closed, so
       # abort explicitly on a non-zero return rather than relying on `set -e`
       # to propagate from a bare function call (its behavior for a function
       # used as the tested command is not portable across bash versions).

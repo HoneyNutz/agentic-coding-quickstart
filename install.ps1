@@ -94,12 +94,19 @@ function Write-Warn {
 function Confirm-Action {
     param([Parameter(Mandatory = $true)][string]$Prompt)
 
-    if ($Yes) {
+    if ($Yes -or ($env:ACQ_ASSUME_YES -eq "1") -or ($env:CI -eq "true")) {
         return $true
     }
 
-    $answer = Read-Host "$Prompt [y/N]"
-    return $answer -match '^(y|yes)$'
+    try {
+        $answer = Read-Host "$Prompt [y/N]"
+        return $answer -match '^(y|yes)$'
+    }
+    catch {
+        # Handles: "PowerShell is in NonInteractive mode. Read and prompt functionality is not available."
+        Write-Warn "Non-interactive PowerShell session detected ($($_.Exception.Message)). Assuming 'yes' to proceed with '$Prompt'."
+        return $true
+    }
 }
 
 function Invoke-InstallCommand {

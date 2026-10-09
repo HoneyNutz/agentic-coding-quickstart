@@ -627,7 +627,7 @@ function Get-ExpectedPackageHash {
                 $sums = Invoke-RestMethod $upstreamSumsUrl
             }
             catch {
-                throw "Could not retrieve SHA256SUMS from $sumsUrl or $upstreamSumsUrl: $_"
+                throw "Could not retrieve SHA256SUMS from $sumsUrl or ${upstreamSumsUrl}. Error: $_"
             }
         }
         else {

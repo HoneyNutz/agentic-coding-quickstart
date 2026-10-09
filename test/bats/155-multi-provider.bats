@@ -297,3 +297,37 @@ MJS
   assert_output "1"
 }
 
+@test "provider: acq provider, acq mode, and acq configure provider persist provider to config.yaml" {
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-subcmds"
+  run env ACQ_BACKEND=sbx ACQ_PROMPT_TEST_INPUT="n" "$ACQ" provider openrouter
+  assert_success
+  run env ACQ_BACKEND=sbx ACQ_PROMPT_TEST_INPUT="n" "$ACQ" mode anthropic
+  assert_success
+  load_acq
+  assert_equal "$(_acq_config_read_field provider)" "anthropic"
+  run env ACQ_BACKEND=sbx ACQ_PROMPT_TEST_INPUT="n" "$ACQ" configure provider gemini
+  assert_success
+  load_acq
+  assert_equal "$(_acq_config_read_field provider)" "gemini"
+}
+
+@test "ensure_key_present: option 'c' allows switching provider on the spot" {
+  run bash -c '
+    export ACQ_SCRIPT_DIR="'"$REPO_ROOT"'"
+    export ACQ_BACKEND=sbx
+    export XDG_CONFIG_HOME="'"$STUBDIR"'/xdg-change"
+    mkdir -p "$XDG_CONFIG_HOME/acq"
+    printf "provider: usai\n" > "$XDG_CONFIG_HOME/acq/config.yaml"
+    printf "c\n2\nn\nn\n" | {
+      . "'"$REPO_ROOT"'/acq.backends/common.sh"
+      . "'"$REPO_ROOT"'/acq.backends/sbx.sh"
+      ACQ_RESOLVED_BACKEND=sbx
+      ACQ_TEST_INTERACTIVE=1 ensure_key_present || true
+    }
+  '
+  assert_success
+  load_acq
+  export XDG_CONFIG_HOME="$STUBDIR/xdg-change"
+  assert_equal "$(_acq_config_read_field provider)" "openrouter"
+}
+

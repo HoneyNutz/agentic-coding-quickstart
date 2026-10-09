@@ -118,10 +118,14 @@ Subcommands:
   backend list                             List detected backends (sbx, msb).
   backend set NAME                         Persist the default backend.
   backend unset                            Clear the persisted default (auto-detect).
-  configure [--provider ID ...]            Interactive setup or set default LLM
+  configure [provider|mode] [--provider ID ...]
+                                           Interactive setup or set default LLM
                                            provider (usai, openrouter, openai,
                                            anthropic, gemini, custom; persists to
                                            config.yaml).
+  provider [NAME]                          Configure or switch LLM key access mode
+                                           (usai, openrouter, openai, anthropic,
+                                           gemini, custom). Alias: `acq mode`.
   kit list                                 Show the pinned kits (+ extras).
   kit validate PATH                        Validate a neutral hybrid/v1 kit.
   kit apply NAME KITREF                    Apply a kit to an existing sandbox.
@@ -266,6 +270,8 @@ acq configure — interactive setup for extra kits, provider, and token scoping 
 
 Usage:
   acq configure
+  acq configure provider [NAME]
+  acq provider [NAME]           # alias: acq mode
   acq configure --provider <usai|openrouter|openai|anthropic|gemini|custom> [--host H --base-url U --models-url M --env E]
 
 Opens an interactive picker to choose which OPT-IN kits to enable (the four
@@ -478,7 +484,7 @@ U
 _acq_verb_backend_help_kind() {
   case "${1%% *}" in
     run|ls|stop|rm|exec|cp|ports|secret|kit) printf 'shared' ;;
-    start|restart|create|shell|version|doctor|github-scope|rotate-api-key|usai-rotate-api-key|backend) printf 'acqonly' ;;
+    start|restart|create|shell|version|doctor|github-scope|rotate-api-key|usai-rotate-api-key|backend|provider|mode) printf 'acqonly' ;;
     *) printf '' ;;
   esac
 }
@@ -495,7 +501,7 @@ _acq_print_topic_help() {
     secret)    _acq_secret_usage; return 0 ;;
     kit)       _acq_kit_usage; return 0 ;;
     backend)   _acq_backend_subcmd_usage; return 0 ;;
-    configure) _acq_configure_usage; return 0 ;;
+    configure|provider|mode) _acq_configure_usage; return 0 ;;
     *)         _acq_simple_verb_usage "$head"; return $? ;;
   esac
 }
@@ -978,6 +984,14 @@ case "$subcommand" in
     shift
     acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
     acq_configure "$@" || exit $?
+    exit 0
+    ;;
+
+  provider|mode)
+    # Dedicated LLM provider / key access mode configuration command.
+    shift
+    acq_resolve_backend "${explicit_backend}" 2>/dev/null || true
+    _acq_configure_provider "$@" || exit $?
     exit 0
     ;;
 

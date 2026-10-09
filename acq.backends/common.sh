@@ -3408,7 +3408,7 @@ ensure_key_present() {
   fi
   [ -n "${ACQ_PROVIDER:-}" ] && explicit_prov="$ACQ_PROVIDER"
 
-  if [ ! -t 0 ]; then
+  if [ ! -t 0 ] && [ -z "${ACQ_PROMPT_TEST_INPUT:-}" ] && [ -z "${ACQ_TEST_INTERACTIVE:-}" ]; then
     if [ -n "$explicit_prov" ]; then
       echo "acq: no ${pname} API key stored; set one with 'acq secret set -g ${svc}' (see $pmgmt). Aborting." >&2
     else
@@ -3462,7 +3462,7 @@ ensure_key_present() {
   fi
 
   local answer=""
-  printf 'Have your %s API key ready to paste? Set it now? [y/N] ' "$pname" >&2
+  printf 'Have your %s API key ready to paste? Set it now? (y = set key, c = change mode/provider, n = cancel) [y/c/N] ' "$pname" >&2
   read -r answer || true
   case "$answer" in
     [yY]|[yY][eE][sS])
@@ -3483,8 +3483,22 @@ ensure_key_present() {
       echo "No ${pname} API key was stored. Aborting." >&2
       return 1
       ;;
+    [cC]|[cC][hH][aA][nN][gG][eE]|[mM]|[mM][oO][dD][eE]|[pP]|[pP][rR][oO][vV]*)
+      echo "Changing LLM provider mode..." >&2
+      _acq_configure_provider || return 1
+      acq_provider_apply_active_facts "$scope_sandbox"
+      svc="${ACQ_ACTIVE_PROVIDER:-usai}"
+      pname="${ACQ_ACTIVE_PROVIDER_NAME:-USAi}"
+      penv="${ACQ_ACTIVE_PROVIDER_KEY_ENV:-USAI_API_KEY}"
+      pmgmt="${ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL:-$USAI_PROVIDER_KEY_MGMT_URL}"
+      if acq_secret_has "$svc" "$scope_sandbox"; then
+        return 0
+      fi
+      ensure_key_present "$@"
+      return $?
+      ;;
     *)
-      echo "Skipping. Aborting; re-run when your ${pname} API key is set." >&2
+      echo "Skipping. Aborting; re-run when your ${pname} API key is set (or run 'acq configure provider' to switch mode)." >&2
       return 1
       ;;
   esac
@@ -3789,6 +3803,8 @@ _acq_configure_show_current() {
   echo "      extra kits:         ${extras:-<none>}" >&2
   echo "      scope GitHub token: ${scope:-no}" >&2
   echo "" >&2
+  echo "      To change LLM provider mode: run 'acq provider' or 'acq configure provider'" >&2
+  echo "" >&2
 }
 
 # _acq_configure_provider [ARGS...] — configure the default generative LLM
@@ -3798,6 +3814,7 @@ _acq_configure_provider() {
   local prov="" chost="" cbase="" cmodels="" cmodel="" cenv="" cmgmt=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      provider|mode) shift; continue ;;
       --provider)   prov="${2:-}"; shift ;;
       --provider=*) prov="${1#--provider=}" ;;
       --host)       chost="${2:-}"; shift ;;
@@ -3894,7 +3911,7 @@ _acq_configure_provider() {
   echo "      api key env:   ${ACQ_ACTIVE_PROVIDER_KEY_ENV}" >&2
   echo "      store key via: acq secret set -g ${prov}" >&2
 
-  if [ -t 0 ] && command -v acq_backend_secret_set >/dev/null 2>&1; then
+  if { [ -t 0 ] || [ -n "${ACQ_PROMPT_TEST_INPUT:-}" ] || [ -n "${ACQ_TEST_INTERACTIVE:-}" ]; } && command -v acq_backend_secret_set >/dev/null 2>&1; then
     echo >&2
     if [ "$prov" = "usai" ]; then
       echo "USAi keys are created at $ACQ_ACTIVE_PROVIDER_KEY_MGMT_URL and expire every 7 days." >&2

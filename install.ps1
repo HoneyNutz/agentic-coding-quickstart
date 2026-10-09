@@ -621,17 +621,13 @@ function Get-ExpectedPackageHash {
         $sums = Invoke-RestMethod $sumsUrl
     }
     catch {
-        if ($ReleaseBaseUrl -notmatch 'GSA-TTS') {
-            $upstreamSumsUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/SHA256SUMS"
-            try {
-                $sums = Invoke-RestMethod $upstreamSumsUrl
-            }
-            catch {
-                throw "Could not retrieve SHA256SUMS from $sumsUrl or ${upstreamSumsUrl}. Error: $_"
-            }
+        $upstreamSumsUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/SHA256SUMS"
+        try {
+            $sums = Invoke-RestMethod $upstreamSumsUrl
         }
-        else {
-            throw $_
+        catch {
+            $err = $_.Exception.Message
+            throw "Could not retrieve SHA256SUMS from $sumsUrl or $upstreamSumsUrl ($err)"
         }
     }
     foreach ($line in ($sums -split "`n")) {

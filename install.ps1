@@ -13,13 +13,14 @@ param(
     [string]$MsbPackageId = $env:ACQ_MSB_WINGET_ID,
     [switch]$NoMsb,
     [switch]$NoPath,
+    [switch]$SkipWhpCheck,
     [switch]$DryRun,
     [switch]$Yes,
     [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
-$ReleaseBaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version"
+$ReleaseBaseUrl = "https://github.com/HoneyNutz/agentic-coding-quickstart/releases/download/v$Version"
 $PackageName = "acq-windows-x64.zip"
 
 # msb version policy. Keep in lockstep with install.sh and acq.backends/msb.sh:
@@ -54,8 +55,8 @@ function Show-Usage {
 install.ps1 - install acq for Windows preview hosts
 
 Usage:
-  irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/install.ps1 | iex
-  .\install.ps1 [-Version <version>] [-InstallDir <path>] [-NoMsb] [-DryRun] [-Yes]
+  irm https://raw.githubusercontent.com/HoneyNutz/agentic-coding-quickstart/main/install.ps1 | iex
+  .\install.ps1 [-Version <version>] [-InstallDir <path>] [-NoMsb] [-SkipWhpCheck] [-DryRun] [-Yes]
 
 Options:
   -Version <version>      Release version to install. Default: $Version
@@ -138,13 +139,13 @@ function Test-WhpEnabled {
         if (-not ("Whp.Capability" -as [type])) {
             Add-Type -Namespace Whp -Name Capability -MemberDefinition @'
 [DllImport("WinHvPlatform.dll")]
-public static extern int WHvCreatePartition(out System.IntPtr Partition, uint Access);
+public static extern int WHvCreatePartition(out System.IntPtr Partition);
 [DllImport("WinHvPlatform.dll")]
 public static extern int WHvDeletePartition(System.IntPtr Partition);
 '@
         }
         $partition = [System.IntPtr]::Zero
-        if ([Whp.Capability]::WHvCreatePartition([ref]$partition, 0) -eq 0) {
+        if ([Whp.Capability]::WHvCreatePartition([ref]$partition) -eq 0) {
             [void][Whp.Capability]::WHvDeletePartition($partition)
             return $true
         }
@@ -180,8 +181,10 @@ public static extern int WHvDeletePartition(System.IntPtr Partition);
 }
 
 function Assert-WhpEnabled {
-    if ($DryRun) {
-        Write-Host "  [dry-run] check Windows Hypervisor Platform is enabled"
+    if ($DryRun -or $NoMsb -or $SkipWhpCheck) {
+        if ($SkipWhpCheck) {
+            Write-Warn "Skipping Windows Hypervisor Platform verification because -SkipWhpCheck was set."
+        }
         return
     }
 
@@ -192,7 +195,20 @@ function Assert-WhpEnabled {
     }
 
     if (-not $result) {
-        throw "Windows Hypervisor Platform is not enabled. Enable it through your device or enterprise administrator, reboot if required, then re-run this installer."
+        Write-Warn "Windows Hypervisor Platform is not enabled or not accessible in this environment."
+        Write-Host "    1. In an elevated command prompt (Run as Administrator), run:"
+        Write-Host "       dism.exe /online /enable-feature /featurename:HypervisorPlatform /all /norestart"
+        Write-Host "    2. Restart your computer."
+        Write-Host ""
+        Write-Host "  If running inside a Virtual Machine (e.g., Parallels, VMware, Hyper-V, Azure):"
+        Write-Host "    Nested virtualization must also be enabled on the host machine:"
+        Write-Host "    - Parallels: VM Settings > Hardware > CPU & Memory > Advanced > Enable Nested Virtualization"
+        Write-Host "    - VMware: VM Settings > Processors > Enable hardware virtualization"
+        Write-Host "    - Hyper-V: Set-VMProcessor -VMName '<VM>' -ExposeVirtualizationExtensions `$true"
+        Write-Host ""
+        Write-Host "  To proceed with installation anyway, pass -SkipWhpCheck:"
+        Write-Host "    .\install.ps1 -SkipWhpCheck"
+        throw "Windows Hypervisor Platform is not enabled. Enable it through your device or enterprise administrator, reboot if required, then re-run this installer (or re-run with -SkipWhpCheck to install anyway)."
     }
 }
 
@@ -604,6 +620,27 @@ function Get-ExpectedPackageHash {
 }
 
 function Install-AcqZip {
+    # If install.ps1 is executed directly from a local clone of the repository:
+    $localRepoRoot = Split-Path -Parent $PSCommandPath
+    if (-not $localRepoRoot) { $localRepoRoot = $PSScriptRoot }
+    if ($localRepoRoot -and (Test-Path -LiteralPath (Join-Path $localRepoRoot "acq") -PathType Leaf) -and -not $PackageUrl) {
+        Write-Host "  Installing acq from local repository ($localRepoRoot)"
+        Invoke-InstallCommand "copy acq from $localRepoRoot to $InstallDir" {
+            New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+            foreach ($item in @("acq", "acq.backends", "acq.cmd", "acq.ps1", "install.ps1", "README.md", "LICENSE", "package.json")) {
+                $src = Join-Path $localRepoRoot $item
+                if (Test-Path -LiteralPath $src) {
+                    $dst = Join-Path $InstallDir $item
+                    if (Test-Path -LiteralPath $dst) {
+                        Remove-Item -LiteralPath $dst -Recurse -Force
+                    }
+                    Copy-Item -LiteralPath $src -Destination $dst -Recurse
+                }
+            }
+        }
+        return
+    }
+
     $url = if ($PackageUrl) { $PackageUrl } else { "$ReleaseBaseUrl/$PackageName" }
     $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
     $zipPath = Join-Path $tmpRoot $PackageName
@@ -612,7 +649,19 @@ function Install-AcqZip {
     try {
         Invoke-InstallCommand "download $url" {
             New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-            Invoke-WebRequest -Uri $url -OutFile $zipPath
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $zipPath
+            }
+            catch {
+                if (-not $PackageUrl -and $ReleaseBaseUrl -notmatch 'GSA-TTS') {
+                    $upstreamUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/$PackageName"
+                    Write-Host "  Downloading base package from $upstreamUrl"
+                    Invoke-WebRequest -Uri $upstreamUrl -OutFile $zipPath
+                }
+                else {
+                    throw $_
+                }
+            }
         }
 
         if (-not $DryRun) {

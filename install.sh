@@ -31,7 +31,7 @@ set -eu
 # Defaults (overridable by flags / environment)
 # ---------------------------------------------------------------------------
 
-REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/GSA-TTS/agentic-coding-quickstart.git}"
+REPO_URL="${ACQ_INSTALL_REPO_URL:-https://github.com/HoneyNutz/agentic-coding-quickstart.git}"
 # release-please updates this version in release PRs. Release automation also
 # publishes an install.sh asset with DEFAULT_RELEASE_SHA replaced by the exact
 # release commit so clone installs can verify they landed on that commit.
@@ -60,7 +60,7 @@ BIN_DIR="${ACQ_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 METHOD="${ACQ_INSTALL_METHOD:-auto}"
 
 # npm package spec used by the npm method (pinned by --ref when possible).
-NPM_SPEC_BASE="github:GSA-TTS/agentic-coding-quickstart"
+NPM_SPEC_BASE="github:HoneyNutz/agentic-coding-quickstart"
 # Homebrew formula used by the brew method.
 BREW_FORMULA="GSA-TTS/tap/acq"
 

@@ -19,7 +19,7 @@ configures the environment for federal usage. To provide that isolation, it uses
 
 | Repo                                                                                  | Purpose       | When to Use                           |
 | ------------------------------------------------------------------------------------- | ------------- | ------------------------------------- |
-| **[Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart)** (you are here) | Get running   | First day setup, sandboxing + USAi config    |
+| **[Quickstart](https://github.com/HoneyNutz/agentic-coding-quickstart)** (you are here) | Get running   | First day setup, sandboxing + USAi config    |
 | **[Playbook](https://github.com/GSA-TTS/agentic-coding-playbook)**                    | Do it right   | Repo setup, standards, best practices |
 | **[Patterns](https://github.com/GSA-TTS/agentic-coding-patterns)**                    | Share & learn | Community patterns, lessons learned   |
 
@@ -83,23 +83,15 @@ Run the one-line installer for your shell.
 
 **Terminal (macOS/Linux):**
 
-<!-- x-release-please-start-version -->
-
 ```bash
-curl -fsSL https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.0.1/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/HoneyNutz/agentic-coding-quickstart/main/install.sh | sh
 ```
-
-<!-- x-release-please-end -->
 
 **PowerShell (Windows):**
 
-<!-- x-release-please-start-version -->
-
 ```powershell
-irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.0.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/HoneyNutz/agentic-coding-quickstart/main/install.ps1 | iex
 ```
-
-<!-- x-release-please-end -->
 
 That's it — you don't have to choose *how* to install. The installer:
 
@@ -165,9 +157,7 @@ For Windows preview installs, download and inspect the PowerShell installer
 instead:
 
 ```powershell
-$AcqVersion = "4.0.1" # x-release-please-version
-$BaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$AcqVersion"
-Invoke-WebRequest "$BaseUrl/install.ps1" -OutFile install.ps1
+Invoke-WebRequest "https://raw.githubusercontent.com/HoneyNutz/agentic-coding-quickstart/main/install.ps1" -OutFile install.ps1
 Get-Content .\install.ps1
 .\install.ps1 -DryRun
 .\install.ps1
@@ -353,7 +343,7 @@ symlinks these into `~/.agents/skills` so your agent discovers them automaticall
 1. **Troubleshooting:** [docs/KNOWN_FAILURE_MODES.md](docs/KNOWN_FAILURE_MODES.md)
 2. **Agent behavior:** [AGENTS.md](AGENTS.md)
 3. **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
-4. **Questions:** Open a [GitHub issue](https://github.com/GSA-TTS/agentic-coding-quickstart/issues)
+4. **Questions:** Open a [GitHub issue](https://github.com/HoneyNutz/agentic-coding-quickstart/issues)
 5. **Platform issues:** support@usai.gov
 
 ---

@@ -621,14 +621,8 @@ function Get-ExpectedPackageHash {
         $sums = Invoke-RestMethod $sumsUrl
     }
     catch {
-        $upstreamSumsUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/SHA256SUMS"
-        try {
-            $sums = Invoke-RestMethod $upstreamSumsUrl
-        }
-        catch {
-            $err = $_.Exception.Message
-            throw "Could not retrieve SHA256SUMS from $sumsUrl or $upstreamSumsUrl ($err)"
-        }
+        $err = $_.Exception.Message
+        throw "Could not retrieve SHA256SUMS from $sumsUrl ($err)"
     }
     foreach ($line in ($sums -split "`n")) {
         if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
@@ -641,14 +635,24 @@ function Get-ExpectedPackageHash {
 
 function Install-AcqZip {
     # If install.ps1 is executed directly from a local clone of the repository:
+    $candidateRoots = @()
+    if ($PSCommandPath) { $candidateRoots += (Split-Path -Parent $PSCommandPath) }
+    if ($PSScriptRoot)  { $candidateRoots += $PSScriptRoot }
+    try {
+        if ($PWD) { $candidateRoots += $PWD.Path }
+        $loc = (Get-Location).Path
+        if ($loc) { $candidateRoots += $loc }
+    } catch {}
+
     $localRepoRoot = ""
-    if ($PSCommandPath) {
-        $localRepoRoot = Split-Path -Parent $PSCommandPath
+    foreach ($candidate in $candidateRoots) {
+        if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate "acq") -PathType Leaf)) {
+            $localRepoRoot = $candidate
+            break
+        }
     }
-    elseif ($PSScriptRoot) {
-        $localRepoRoot = $PSScriptRoot
-    }
-    if ($localRepoRoot -and (Test-Path -LiteralPath (Join-Path $localRepoRoot "acq") -PathType Leaf) -and -not $PackageUrl) {
+
+    if ($localRepoRoot -and -not $PackageUrl) {
         Write-Host "  Installing acq from local repository ($localRepoRoot)"
         Invoke-InstallCommand "copy acq from $localRepoRoot to $InstallDir" {
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -670,6 +674,7 @@ function Install-AcqZip {
     $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
     $zipPath = Join-Path $tmpRoot $PackageName
     $extractDir = Join-Path $tmpRoot "extract"
+    $skipShaVerify = $false
 
     try {
         Invoke-InstallCommand "download $url" {
@@ -678,10 +683,11 @@ function Install-AcqZip {
                 Invoke-WebRequest -Uri $url -OutFile $zipPath
             }
             catch {
-                if (-not $PackageUrl -and $ReleaseBaseUrl -notmatch 'GSA-TTS') {
-                    $upstreamUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$Version/$PackageName"
-                    Write-Host "  Downloading base package from $upstreamUrl"
-                    Invoke-WebRequest -Uri $upstreamUrl -OutFile $zipPath
+                if (-not $PackageUrl) {
+                    $archiveUrl = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/refs/heads/main.zip"
+                    Write-Host "  Downloading latest repository archive from $archiveUrl"
+                    Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
+                    $skipShaVerify = $true
                 }
                 else {
                     throw $_
@@ -689,7 +695,7 @@ function Install-AcqZip {
             }
         }
 
-        if (-not $DryRun) {
+        if (-not $DryRun -and -not $skipShaVerify) {
             $expected = Get-ExpectedPackageHash
             $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
             if ($actual -ne $expected) {

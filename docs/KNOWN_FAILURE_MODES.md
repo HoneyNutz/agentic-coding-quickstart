@@ -245,7 +245,7 @@ Agent assumes host filesystem layout, not container layout.
 ### Fix
 
 The `usai-provider` kit sets both timeouts under the provider's `options` in its
-[`opencode.jsonc`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/main/integrations/isolation/acq-kits/usai-provider/files/home/usai-config/opencode.jsonc):
+[`opencode.jsonc`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/v1.16.1/integrations/isolation/acq-kits/usai-provider/files/home/usai-config/opencode.jsonc):
 `timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
 chunks, 2 minutes); check that file for the current values. If the read timeout
 recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below

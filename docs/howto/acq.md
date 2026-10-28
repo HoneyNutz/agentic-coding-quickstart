@@ -278,6 +278,22 @@ Get-Content .\install.ps1
 .\install.ps1
 ```
 
+The installer fails closed: it only installs a zip whose SHA-256 it can verify.
+A release without `SHA256SUMS` is refused, and it never falls back to an
+unpinned branch archive. To install a fork (or any commit) that has no published
+release, pin the commit and its archive hash:
+
+```powershell
+$Ref = "<40-character commit SHA>"
+Invoke-WebRequest "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/$Ref.zip" -OutFile acq.zip
+(Get-FileHash -Algorithm SHA256 .\acq.zip).Hash   # record this hash
+.\install.ps1 -Ref $Ref -Sha256 <hash>
+```
+
+> **Adversarial model testing:** the Windows path is a preview. For red-teaming
+> or other work that treats the model as hostile, use a Linux (RHEL 9) KVM host;
+> see the `ai-cyber-sandbox-infra` repository for the hardened Azure deployment.
+
 Running `.\install.ps1` (and the installed `acq`, via `acq.cmd`) requires a
 PowerShell **execution policy** that permits local scripts. Windows 11 client
 defaults to `Restricted`, so those steps fail with `PSSecurityException` on an

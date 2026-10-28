@@ -1,0 +1,30 @@
+#cloud-config
+# Rendered by infra/bicep/modules/vm.bicep: the __PLACEHOLDERS__ are replaced at
+# deploy time. Keep this file small; the real work is in bootstrap-host.sh.
+write_files:
+  - path: /opt/ai-sandbox/bootstrap-host.sh
+    owner: root:root
+    permissions: '0750'
+    encoding: b64
+    content: __BOOTSTRAP_B64__
+  - path: /usr/local/bin/sandbox-run
+    owner: root:root
+    permissions: '0755'
+    encoding: b64
+    content: __SANDBOX_RUN_B64__
+  - path: /etc/audit/rules.d/90-ai-sandbox.rules
+    owner: root:root
+    permissions: '0640'
+    encoding: b64
+    content: __AUDIT_RULES_B64__
+  - path: /etc/ai-sandbox/host.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      ACQ_REPO_URL=__ACQ_REPO_URL__
+      ACQ_COMMIT_SHA=__ACQ_COMMIT_SHA__
+      MAX_SANDBOXES=__MAX_SANDBOXES__
+      ADMIN_USER=__ADMIN_USER__
+
+runcmd:
+  - [ /opt/ai-sandbox/bootstrap-host.sh ]

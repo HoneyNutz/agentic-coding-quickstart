@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# sandbox-run - the only sanctioned way to start a test session on this host.
+#
+#   sudo -u ai-sandbox sandbox-run AGENT [--seed NAME] [-- AGENT_ARGS...]
+#
+# AGENT is opencode, codex, or claude. Every run gets a fresh, empty workspace
+# (optionally seeded from a root-owned target under /var/lib/ai-sandbox/targets),
+# a disposable acq --clone sandbox under the strict egress tier, a full
+# transcript in /var/log/ai-sandbox/runs, and is destroyed on exit. Concurrent
+# runs are capped by MAX_SANDBOXES in /etc/ai-sandbox/sandbox.conf.
+set -euo pipefail
+
+STATE_DIR=/var/lib/ai-sandbox
+LOG_DIR=/var/log/ai-sandbox/runs
+TARGETS_DIR=$STATE_DIR/targets
+LOCK_DIR=$STATE_DIR/locks
+
+# sudo resets PATH to secure_path and may keep the caller's HOME; acq and msb
+# live under the service account's home.
+export HOME=$STATE_DIR/home
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+die() { echo "sandbox-run: $*" >&2; exit 1; }
+audit() { logger -t ai-sandbox -p local5.notice -- "$*"; }
+
+[ "$(id -un)" = "ai-sandbox" ] || die "run me as: sudo -u ai-sandbox sandbox-run ..."
+[ -f "$STATE_DIR/READY" ] || die "host is not ready: $(cat "$STATE_DIR/NOT_READY" 2>/dev/null || echo 'bootstrap has not completed')"
+
+agent="${1:-}"
+shift || true
+case "$agent" in
+  opencode|codex|claude) ;;
+  *) die "usage: sandbox-run {opencode|codex|claude} [--seed NAME] [-- AGENT_ARGS...]" ;;
+esac
+
+seed=""
+if [ "${1:-}" = "--seed" ]; then
+  seed="${2:-}"
+  shift 2 || die "--seed needs a NAME"
+  [[ "$seed" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "seed names are lowercase letters, digits and hyphens"
+  [ -d "$TARGETS_DIR/$seed" ] || die "no such seed: $TARGETS_DIR/$seed"
+fi
+if [ "${1:-}" = "--" ]; then
+  shift
+fi
+
+# Root-owned configuration only; nothing here comes from the caller's environment.
+# shellcheck source=/dev/null
+. /etc/ai-sandbox/sandbox.conf
+provider_env="/etc/ai-sandbox/providers/$agent.env"
+[ -f "$provider_env" ] || die "$provider_env is missing: run scripts/configure-providers.sh on the host"
+[ "$(stat -c %U "$provider_env")" = "root" ] || die "$provider_env must be owned by root"
+set -a
+# shellcheck source=/dev/null
+. "$provider_env"
+set +a
+export ACQ_BACKEND ACQ_NETWORK_TIER
+[ "$ACQ_NETWORK_TIER" = "strict" ] || die "refusing to run with ACQ_NETWORK_TIER=$ACQ_NETWORK_TIER"
+
+# Concurrency cap: hold one of MAX_SANDBOXES slot locks for the whole run.
+mkdir -p "$LOCK_DIR"
+slot=""
+for i in $(seq 1 "$MAX_SANDBOXES"); do
+  exec {lock_fd}>"$LOCK_DIR/slot.$i"
+  if flock -n "$lock_fd"; then
+    slot=$i
+    break
+  fi
+  exec {lock_fd}>&-
+done
+[ -n "$slot" ] || die "all $MAX_SANDBOXES sandbox slots are busy; try again later"
+
+# The run id is also the workspace basename, so acq names the sandbox
+# "<agent>-<run id>" (see derive_name in acq.backends/common.sh).
+run_id="run-$(date -u +%Y%m%d%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+workspace="$STATE_DIR/work/$run_id"
+sandbox_name="$agent-$run_id"
+transcript="$LOG_DIR/$run_id.$agent.log"
+
+mkdir -m 0700 "$workspace"
+if [ -n "$seed" ]; then
+  cp -a --no-preserve=ownership "$TARGETS_DIR/$seed/." "$workspace/"
+fi
+
+cleanup() {
+  local rc=$?
+  acq rm "$sandbox_name" >/dev/null 2>&1 || audit "WARN run=$run_id could not remove sandbox $sandbox_name"
+  rm -rf --one-file-system "$workspace"
+  audit "END run=$run_id agent=$agent slot=$slot rc=$rc operator=${SUDO_USER:-unknown}"
+}
+trap cleanup EXIT
+
+image_args=()
+if [ -n "${ACQ_AGENT_IMAGE:-}" ]; then
+  [[ "$ACQ_AGENT_IMAGE" == *@sha256:* ]] || die "ACQ_AGENT_IMAGE must be pinned by digest"
+  image_args=(--image "$ACQ_AGENT_IMAGE")
+fi
+
+audit "START run=$run_id agent=$agent slot=$slot seed=${seed:-none} operator=${SUDO_USER:-unknown} transcript=$transcript"
+
+cmd=(acq run "$agent" "$workspace" --clone "${image_args[@]}" --no-update-check)
+if [ "$#" -gt 0 ]; then
+  cmd+=(-- "$@")
+fi
+
+# script(1) records the full interactive session; it is written by the host,
+# outside the guest, so the model cannot edit its own transcript.
+script --quiet --flush --return --log-out "$transcript" --command "$(printf '%q ' "${cmd[@]}")"

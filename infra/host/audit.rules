@@ -1,0 +1,35 @@
+# auditd rules for the AI sandbox host. Events are forwarded to syslog local6
+# and shipped off-host by the Azure Monitor Agent. Any hit on the "escape"
+# keys outside a sandbox-run session is a trigger for docs/RUNBOOK-escape.md.
+
+# Who opens the hypervisor device.
+-w /dev/kvm -p rwa -k kvm-access
+
+# Tampering with the sandbox runtime, acq, or the host's own config.
+-w /var/lib/ai-sandbox/home/.local/bin -p wa -k sandbox-runtime
+-w /var/lib/ai-sandbox/home/.microsandbox -p wa -k sandbox-runtime
+-w /opt/ai-sandbox -p wa -k sandbox-runtime
+-w /usr/local/bin/sandbox-run -p wa -k sandbox-runtime
+-w /etc/ai-sandbox -p wa -k sandbox-config
+
+# The acq secret store (model API keys).
+-w /var/lib/ai-sandbox/home/.local/share/acq -p rwa -k secret-store
+-w /var/lib/ai-sandbox/home/.config/acq -p wa -k sandbox-config
+
+# Identity and privilege changes.
+-w /etc/sudoers -p wa -k privilege
+-w /etc/sudoers.d -p wa -k privilege
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/ssh/sshd_config -p wa -k identity
+
+# SELinux and audit configuration.
+-w /etc/selinux -p wa -k selinux
+-w /etc/audit -p wa -k audit-config
+-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -k kernel-module
+
+# Every process the sandbox service account starts on the HOST. The microVM's
+# own processes are inside the guest kernel and never appear here, so anything
+# unexpected under this key means code ran outside the VM boundary.
+-a always,exit -F arch=b64 -S execve -F uid=ai-sandbox -k sandbox-host-exec

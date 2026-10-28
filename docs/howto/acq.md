@@ -292,7 +292,7 @@ Invoke-WebRequest "https://github.com/HoneyNutz/agentic-coding-quickstart/archiv
 
 > **Adversarial model testing:** the Windows path is a preview. For red-teaming
 > or other work that treats the model as hostile, use a Linux (RHEL 9) KVM host;
-> see the `ai-cyber-sandbox-infra` repository for the hardened Azure deployment.
+> see [`infra/`](../../infra/README.md) for the hardened Azure deployment.
 
 Running `.\install.ps1` (and the installed `acq`, via `acq.cmd`) requires a
 PowerShell **execution policy** that permits local scripts. Windows 11 client

@@ -18,7 +18,7 @@ Re-run after every rebuild and every acq or msb version change.
 ## Network (from the host)
 
 - [ ] `curl -sS -m 5 https://example.com` **fails**.
-- [ ] `curl -sS -m 5 https://registry-1.docker.io` **fails**.
+- [ ] `curl -sS -m 5 https://registry-1.docker.io` and `https://ghcr.io` **fail**.
 - [ ] `getent hosts SUB.openai.azure.com` resolves to a `10.42.0.32/27` address
       for each Foundry account; same for the ACR login server.
 - [ ] `curl -sS -m 5 -o /dev/null -w '%{http_code}' https://SUB.openai.azure.com/` returns an HTTP code (reachable privately).

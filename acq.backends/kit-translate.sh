@@ -35,7 +35,7 @@
 #   kit_spec_net_allow   SPEC                -> one host[:port] per line
 #   kit_spec_published_ports SPEC            -> one "guest<TAB>proto<TAB>name<TAB>host" per line
 #   kit_spec_volumes     SPEC                -> one "path<TAB>type<TAB>size" per line
-#   kit_spec_files       SPEC                -> one "path|mode|phase|source" per line
+#   kit_spec_files       SPEC                -> one "path|mode|phase|source|readonly" per line
 #   kit_spec_commands    SPEC                -> command records (see format below)
 #   kit_spec_env         SPEC                -> one "NAME<TAB>value" per line
 #   kit_spec_has_shortcut SPEC BACKEND       -> 0 if backend_shortcuts.<backend>
@@ -56,10 +56,18 @@ kit_translate_fetch() {
 
   case "$kitref" in
     git+http*)
-      local url ref dir frag
+      local url ref dir frag authority
       url="${kitref#git+}"
       frag="${url#*#}"
       url="${url%%#*}"
+      authority="${url#*://}"
+      authority="${authority%%/*}"
+      case "$authority" in
+        *@*)
+          echo "kit-translate: credential-bearing kit URLs are not allowed" >&2
+          return 1
+          ;;
+      esac
       # Parse &-separated fragment params ref= and dir=.
       ref=""; dir=""
       local IFS='&'
@@ -74,7 +82,7 @@ kit_translate_fetch() {
         esac
       done
       if [ -z "$ref" ] || [ -z "$dir" ]; then
-        echo "kit-translate: malformed kit ref (need #ref=&dir=): $kitref" >&2
+        echo "kit-translate: malformed kit ref (need #ref=&dir=)" >&2
         return 1
       fi
       # Defense-in-depth: reject a hostile dir= (path traversal / metachars).
@@ -90,7 +98,7 @@ kit_translate_fetch() {
         echo "kit-translate: unsafe kit dir (illegal characters): $dir" >&2
         return 1
       fi
-      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: $url ref=$ref dir=$dir -> $destdir"
+      command -v acq_debug >/dev/null 2>&1 && acq_debug "fetch: ref=$ref dir=$dir -> $destdir"
       mkdir -p "$destdir"
       # Fetch NON-INTERACTIVELY. We MUST NOT drop into an interactive git
       # credential prompt (which hangs, or fails on GitHub's disabled password
@@ -134,8 +142,11 @@ kit_translate_fetch() {
         # authed retry (system config) succeeded
         :
       else
-        echo "kit-translate: failed to fetch $kitref" >&2
-        [ -n "$_ferr" ] && printf '%s\n' "$_ferr" | sed 's/^/kit-translate:   /' >&2
+        echo "kit-translate: failed to fetch remote kit" >&2
+        # The authenticated retry inherits credential helpers and URL rewrites.
+        # Their diagnostics can contain credential-bearing URLs, so never replay
+        # raw git stderr into terminal or CI logs.
+        [ -z "$_ferr" ] || echo "kit-translate:   git fetch failed (details suppressed)" >&2
         cat >&2 <<'EOM'
 kit-translate: If you saw a "Username for 'https://github.com'" prompt, plain git
 kit-translate:   (not gh) is trying to authenticate. gh auth authenticates the gh
@@ -692,9 +703,14 @@ _kit_vol_validate() {
 # kit_spec_files SPEC
 # ---------------------------------------------------------------------------
 # Echo one record per files[] entry, tab-separated:
-#   path <TAB> mode <TAB> phase <TAB> source
+#   path <TAB> mode <TAB> phase <TAB> source <TAB> readonly
 # phase is empty if unspecified (default: written before commands run).
 # source is empty for inline-content files (not used by the four acq kits).
+# readonly is "true" iff the entry declares `readonly: true` — a file whose
+# BYTES are trusted CODE acq must execute from a host-authoritative read-only
+# mount rather than a guest-writable copy a passwordless-sudo agent could tamper
+# (ADR-0035). Empty (treated as false) otherwise, so existing 4-field consumers
+# and unflagged files are unaffected.
 kit_spec_files() {
   local spec="$1"
   [ -f "$spec" ] || return 0
@@ -723,9 +739,10 @@ kit_spec_files() {
       if (k=="mode")   cur_mode=v
       if (k=="phase")  cur_phase=v
       if (k=="source") cur_source=v
+      if (k=="readonly") cur_readonly=v
       if (k=="description") cur_desc=v
     }
-    function flush() {
+    function flush(   ro) {
       if (cur_path != "") {
         # Reject fields that could break out of the shell contexts these values
         # are later interpolated into. A hostile or mistyped kit spec must not
@@ -742,6 +759,7 @@ kit_spec_files() {
         # kit stages no files at all — a silent, host-dependent failure, because
         # the warning goes to stderr and the create path treats kit failures as
         # best-effort. Do NOT "simplify" this back to an interval expression.
+        ro = (cur_readonly == "true") ? "true" : ""
         if (cur_mode != "" && cur_mode !~ /^[0-7][0-7][0-7][0-7]?$/) {
           print "kit-translate: skipping file with invalid mode: " cur_mode > "/dev/stderr"
         } else if (cur_path !~ /^[A-Za-z0-9._\/-]+$/) {
@@ -749,10 +767,10 @@ kit_spec_files() {
         } else if (cur_source != "" && cur_source !~ /^[A-Za-z0-9._\/-]+$/) {
           print "kit-translate: skipping file with unsafe source: " cur_source > "/dev/stderr"
         } else {
-          printf "%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source
+          printf "%s\t%s\t%s\t%s\t%s\n", cur_path, cur_mode, cur_phase, cur_source, ro
         }
       }
-      cur_path=""; cur_mode=""; cur_phase=""; cur_source=""; cur_desc=""
+      cur_path=""; cur_mode=""; cur_phase=""; cur_source=""; cur_readonly=""; cur_desc=""
     }
   ' "$spec"
 }

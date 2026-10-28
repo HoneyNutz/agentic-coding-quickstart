@@ -73,17 +73,20 @@ export ACQ_SBX_KIT_PASSTHROUGH=1
 # them. Instead root a SINGLE shared offline-kit dir under bats' run-scoped
 # temp dir (BATS_RUN_TMPDIR, which bats removes at the end of the run); fall back
 # to a per-process mktemp only when run outside bats. The dir holds a stub spec
-# with no secrets, so sharing it across tests is safe.
+# with no secrets. Publish each complete spec atomically: parallel workers can
+# read these paths while another worker sources this helper.
 if [ -n "${BATS_RUN_TMPDIR:-}" ]; then
   _ACQ_MSB_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR}/acq-offline-kit"
   mkdir -p "$_ACQ_MSB_OFFLINE_KIT_DIR"
 else
   _ACQ_MSB_OFFLINE_KIT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/acq-nokit.XXXXXX")
 fi
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: x\ndisplayName: X\ndescription: x\n' > "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" \
+  && mv -f "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_MSB_OFFLINE_KIT_DIR/spec.yaml" || return 1
 _ACQ_AGENT_OFFLINE_KIT_DIR="${BATS_RUN_TMPDIR:-$_ACQ_MSB_OFFLINE_KIT_DIR}/acq-opencode-kit"
 mkdir -p "$_ACQ_AGENT_OFFLINE_KIT_DIR"
-printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml"
+printf 'schemaVersion: "hybrid/v1"\nkind: mixin\nname: opencode\ndisplayName: OpenCode\ndescription: offline agent kit\nagent:\n  name: opencode\n  entrypoint: opencode\n' > "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" \
+  && mv -f "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml.$$" "$_ACQ_AGENT_OFFLINE_KIT_DIR/spec.yaml" || return 1
 export ACQ_MSB_KIT_LOCAL_DIR="$_ACQ_MSB_OFFLINE_KIT_DIR"
 export ACQ_TEST_AGENT_KIT="$_ACQ_AGENT_OFFLINE_KIT_DIR"
 
@@ -116,9 +119,12 @@ case "${1:-}" in
   version) printf 'sbx version: v%s abc123\n' "${STUB_SBX_VERSION:-0.39.0}" ;;
   --help|-h) printf 'SBX-TOPLEVEL-HELP\n' ;;
   ls)
+    [ "${STUB_SBX_LS_FAIL:-0}" = "1" ] && exit 1
     [ -f "$STUBDIR/.sandbox_list" ] && cat "$STUBDIR/.sandbox_list"
     exit 0 ;;
-  create) : >"$STUBDIR/.created"; exit 0 ;;
+  create)
+    [ "${STUB_SBX_CREATE_FAIL:-0}" = "1" ] && exit 1
+    : >"$STUBDIR/.created"; exit 0 ;;
   exec)
     snippet=""; prev=""
     for a in "$@"; do [ "$prev" = "-c" ] && { snippet="$a"; break; }; prev="$a"; done
@@ -193,7 +199,13 @@ case "${1:-}" in
         touch "$STUBDIR/.opencode_fixed"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  run)  [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'; exit 0 ;;
+  run)
+    [ "${2:-}" = "--help" ] && printf 'SBX-RUN-HELP\n'
+    # Agent arguments require an agent positional before `--`. SBX otherwise
+    # forwards the separator to its shell launcher, where Bash rejects it.
+    [ "${2:-}" = "--name" ] && [ "${4:-}" = "--" ] && exit 2
+    exit 0
+    ;;
   stop) exit 0 ;;
   start) exit 0 ;;
   rm)   exit 0 ;;
@@ -253,8 +265,17 @@ case "$_msb_sub" in
     # `msb inspect <name> --format json` — emit a create-time published-ports
     # JSON fixture if the test planted one, else nothing (models an absent field
     # / no ports so _acq_msb_ports_from_inspect must degrade gracefully).
+    # STUB_MSB_INSPECT_FAIL_TIMES=N fails the first N inspects (with a stderr
+    # line) and then succeeds, modelling a transient inspect failure.
+    _inspect_fails=$(cat "$STUBDIR/.msb_inspect_fails" 2>/dev/null || echo 0)
+    if [ "$_inspect_fails" -lt "${STUB_MSB_INSPECT_FAIL_TIMES:-0}" ]; then
+      echo $((_inspect_fails + 1)) >"$STUBDIR/.msb_inspect_fails"
+      echo "error: stub inspect failure" >&2
+      exit 1
+    fi
     [ -f "$STUBDIR/.msb_inspect_json" ] && cat "$STUBDIR/.msb_inspect_json" ;;
   list|ls)
+    [ "${STUB_MSB_LIST_FAIL:-0}" = "1" ] && exit 1
     # `msb list --running -q` (running-state probe, ADR-0017 stopped detection):
     # emit the RUNNING fixture if the caller asked for --running, else the full
     # existence fixture. A test that wants a sandbox to appear STOPPED plants it
@@ -335,12 +356,13 @@ case "$_msb_sub" in
       # models a bash-less base. MUST precede the generic command-v arm.
       *"command -v bash"*)
         [ "${STUB_GUEST_BASH:-1}" = "0" ] && exit 1 || printf '/bin/bash\n' ;;
-      # The agent-user-ready marker gate. Default ABSENT (exit 1, like the
-      # generic test -f arm) so provision runs the full block;
-      # STUB_AGENT_USER_READY=1 models an already-provisioned sandbox so the
-      # heal's marker-hit shell-sync path can be exercised.
-      *"test -f '/var/lib/acq/agent-user-ready'"*)
-        [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && exit 0 || exit 1 ;;
+      # ADR-0035 readonly mount probe. The 0711 mount root is traversable, not
+      # listable: known 0555 payload paths remain executable without directory
+      # read permission. A writable mount must still be rejected.
+      *"test -d '/var/lib/acq/host'"*)
+        [ "${STUB_HOST_CONFIG_MOUNT:-1}" = "0" ] && exit 1 || exit 0 ;;
+      *".acq-ro-probe"*)
+        [ "${STUB_HOST_CONFIG_WRITABLE:-0}" = "1" ] && exit 1 || exit 0 ;;
       # `command -v <agent>` (agent-presence probe): controllable so the install
       # path can be exercised. By default the agent is ABSENT (exit 1) so install
       # runs; STUB_AGENT_PRESENT=1 makes it "present" (skips install). The prereq
@@ -393,51 +415,8 @@ case "$_msb_sub" in
       *"command -v"*) : ;;          # prereqs "present" (empty missing set)
       *"test -f "*) exit 1 ;;       # markers absent
       *"test -s "*) exit 0 ;;       # copied files present
-      # The /var/lib/acq marker reads (agent, workspace, ssh-auth-sock,
-      # kit-env). An UNSET STUB_RECORDED_* models an ABSENT marker faithfully:
-      # a real `sh -c 'cat …'` exits 1 there, and acq runs under
-      # `set -euo pipefail`, so every reader must survive that nonzero (a
-      # sandbox from before a marker existed, or one whose feature was never
-      # configured, still has to serve every session verb). A SET-but-empty
-      # value models a present-but-empty marker (cat exits 0).
-      *"cat /var/lib/acq/agent"*)
-        [ -n "${STUB_RECORDED_AGENT+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_AGENT" ;;
-      *"cat /var/lib/acq/workspace"*)
-        [ -n "${STUB_RECORDED_WORKSPACE+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_WORKSPACE" ;;
-      # ADR-0021: the persisted ssh-agent guest sock marker read by
-      # _acq_msb_ssh_auth_sock_for (and, via it, run/attach/start).
-      *"cat /var/lib/acq/ssh-auth-sock"*)
-        [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] || exit 1
-        printf '%s' "$STUB_RECORDED_SSH_AUTH_SOCK" ;;
-      # The persisted kit environment[] marker (see ADR-0011). The write/reset
-      # arms keep a STATEFUL model in $STUBDIR/.kit_env so the full
-      # provision→heal→replay cycle is testable (stale-entry regression);
-      # STUB_RECORDED_KIT_ENV, when set, overrides it with fixed content
-      # (multi-line values model multiple entries). Absent/empty semantics per
-      # the marker-reads comment above.
-      *">> /var/lib/acq/kit-env"*)
-        # Append the env tokens: argv shape is `… -- sh -c '<script>' sh
-        # NAME=value…` — collect everything after the argv0 `sh` that follows
-        # the script.
-        _kes_c=0 _kes_script=0 _kes_argv0=0
-        for a in "$@"; do
-          if [ "$_kes_argv0" = 1 ]; then printf '%s\n' "$a" >>"$STUBDIR/.kit_env"
-          elif [ "$_kes_script" = 1 ] && [ "$a" = "sh" ]; then _kes_argv0=1
-          elif [ "$_kes_c" = 1 ]; then _kes_script=1; _kes_c=0
-          elif [ "$a" = "-c" ]; then _kes_c=1
-          fi
-        done ;;
-      *"rm -f /var/lib/acq/kit-env"*) rm -f "$STUBDIR/.kit_env" ;;
-      *"cat /var/lib/acq/kit-env"*)
-        if [ -n "${STUB_RECORDED_KIT_ENV+x}" ]; then
-          printf '%s' "$STUB_RECORDED_KIT_ENV"
-        elif [ -f "$STUBDIR/.kit_env" ]; then
-          cat "$STUBDIR/.kit_env"
-        else
-          exit 1
-        fi ;;
+      # ADR-0035 stores agent/workspace/ssh-auth-sock/kit-env on the host. Test
+      # knobs are seeded there by seed_host_config, so no guest marker arm remains.
       *) : ;;
     esac ;;
   ssh)
@@ -621,3 +600,26 @@ load_acq() {
   # failing command via errexit inherited into the @test body, so disabling it
   # in setup() makes every assertion in the suite pass vacuously (#381 review).
 }
+
+# Seed host-authoritative config values for session-path tests. Unset knobs model
+# absent keys and exercise the adapter's documented fallbacks.
+seed_host_config() {
+  local backend="${1:-msb}" name="${2:-}"
+  [ -n "$name" ] || return 0
+  command -v acq_host_config_write >/dev/null 2>&1 || return 0
+  [ -n "${STUB_RECORDED_AGENT+x}" ] && acq_host_config_write "$backend" "$name" agent "$STUB_RECORDED_AGENT"
+  [ -n "${STUB_RECORDED_WORKSPACE+x}" ] && acq_host_config_write "$backend" "$name" workspace "$STUB_RECORDED_WORKSPACE"
+  [ -n "${STUB_RECORDED_SSH_AUTH_SOCK+x}" ] && acq_host_config_write "$backend" "$name" ssh-auth-sock "$STUB_RECORDED_SSH_AUTH_SOCK"
+  [ -n "${STUB_RECORDED_KIT_ENV+x}" ] && acq_host_config_write "$backend" "$name" kit-env "$STUB_RECORDED_KIT_ENV"
+  return 0
+}
+export -f seed_host_config 2>/dev/null || true
+
+# Seed the host-side agent-user gate for a pre-provisioned sandbox test fixture.
+seed_host_config_gates() {
+  local backend="${1:-msb}" name="${2:-}"
+  [ -n "$name" ] || return 0
+  command -v acq_host_config_write >/dev/null 2>&1 || return 0
+  [ "${STUB_AGENT_USER_READY:-0}" = "1" ] && acq_host_config_write "$backend" "$name" agent-user-ready 1
+}
+export -f seed_host_config_gates 2>/dev/null || true

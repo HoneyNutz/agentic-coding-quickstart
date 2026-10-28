@@ -227,8 +227,10 @@ jobs:
           # bash 3.2.57 (2007) predates modern GCC defaults; relax the two
           # errors-by-default (implicit function/int) so it configures & builds.
           # GCC 15 defaults to C23, where `f()` means "no arguments", which
-          # breaks bash's K&R-style prototypes; build as gnu17 instead.
-          CFLAGS="-std=gnu17 -Wno-implicit-function-declaration -Wno-implicit-int" \
+          # breaks bash's K&R-style prototypes; build as gnu17 instead. The
+          # flags go in CC, not CFLAGS: bash's build-time helpers (mkbuiltins,
+          # mksyntax) compile with CFLAGS_FOR_BUILD and never see CFLAGS.
+          CC="gcc -std=gnu17 -Wno-implicit-function-declaration -Wno-implicit-int" \
             ./configure --prefix=/opt/bash32
           make -j"$(nproc)"
           make install

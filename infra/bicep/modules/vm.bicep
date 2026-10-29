@@ -17,8 +17,10 @@ param autoShutdownTime string
 param autoShutdownTimeZone string
 param tags object
 
+@description('Name of the required local admin. The bootstrap locks it; operators sign in with Entra ID.')
+param adminUsername string = 'breakglass'
+
 var vmName = '${prefix}-host'
-var adminUsername = 'breakglass'
 
 // Built-in role definition IDs.
 var vmUserLoginRoleId = 'fb879df8-f326-4884-b1cf-06f3ad86be52'

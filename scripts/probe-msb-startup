@@ -433,13 +433,26 @@ def relay(pid, fd, directory):
                 announced = True
 
 
+def signal_owned_child(pid, sig):
+    """Signal the child's process group, or the child alone if it has none yet.
+
+    Right after pty.fork() the child may not have called setsid(), so its group
+    does not exist yet. macOS also refuses (EPERM) to signal a group whose only
+    member is an unreaped zombie. Neither case is an error for cleanup.
+    """
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass  # Already exited (possibly a zombie awaiting waitpid).
+
+
 def terminate_owned_child(pid):
     """Bound cleanup when terminal or artifact I/O fails while the child runs."""
     reaped = False
-    try:
-        os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass  # The group may already have exited.
+    signal_owned_child(pid, signal.SIGTERM)
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         if not reaped:
@@ -453,11 +466,13 @@ def terminate_owned_child(pid):
             os.killpg(pid, 0)
         except ProcessLookupError:
             break
+        except PermissionError:
+            # macOS: the group holds only zombies. Ours is reaped above on the
+            # next pass; once it is, nothing signalable is left.
+            if reaped:
+                break
         time.sleep(0.02)
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass  # All group members exited during the grace period.
+    signal_owned_child(pid, signal.SIGKILL)
     if not reaped:
         os.waitpid(pid, 0)
 

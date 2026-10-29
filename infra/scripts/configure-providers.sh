@@ -59,7 +59,9 @@ for agent in opencode codex claude; do
   echo
   [ -n "$key" ] || { echo "empty key; skipping $agent" >&2; continue; }
   # shellcheck disable=SC2016
-  printf '%s\n' "$key" | sudo -u ai-sandbox -H env HOME=/var/lib/ai-sandbox/home \
+  # NO_LIVE_REFEED: a global set would otherwise bind this key into every
+  # existing sandbox, including other agents' sandboxes.
+  printf '%s\n' "$key" | sudo -u ai-sandbox -H env HOME=/var/lib/ai-sandbox/home ACQ_SECRET_NO_LIVE_REFEED=1 \
     PATH=/var/lib/ai-sandbox/home/.local/bin:/usr/bin:/bin \
     bash -c 'set -a; . "/etc/ai-sandbox/providers/$1.env"; set +a; acq secret set -g "$ACQ_PROVIDER" --host "$ACQ_PROVIDER_HOST" --env "$ACQ_PROVIDER_KEY_ENV"' _ "$agent"
   unset key

@@ -23,10 +23,14 @@ Every control below assumes the layer inside it has already failed.
    that account: `sandbox-run`.
 4. **microVM boundary.** Every run is a separate `msb` microVM (KVM) with its
    own guest kernel, not a container sharing the host kernel.
-5. **acq `strict` egress.** Inside the guest, egress is denied by default and
-   only the kit hosts (the agent's Foundry endpoint) are allowed. Model API keys
-   are injected on the host into outbound requests to that one host; the guest
-   only ever sees a placeholder.
+5. **Pinned guest egress.** `strict` alone is deny-by-default plus the union of
+   every applied kit's allow-list, which still includes every known LLM
+   provider, GitHub and npm. `sandbox-run` therefore sets `ACQ_EGRESS_PIN` to the
+   agent's own Foundry host: after all kits have contributed, acq drops every
+   other allow rule, keeps only DNS and that host, and denies inbound
+   connections. Opt-in kits are refused and the host ssh-agent is never
+   forwarded. Model API keys are injected on the host into requests to that one
+   host; the guest only ever sees a placeholder.
 6. **Disposable workspaces.** `--clone`, a fresh empty workspace per run, no
    host repos mounted, everything destroyed on exit. Agent output is untrusted
    and is reviewed on a separate machine, never executed on the host.
@@ -39,10 +43,11 @@ Every control below assumes the layer inside it has already failed.
 | VM | `Standard_D8s_v5`, Trusted Launch or Standard | Supports nested virtualization; never a Confidential VM |
 | SELinux | Enforcing, targeted modules for real denials | Extra layer against an escaped guest |
 | Agents | `opencode` (primary), `codex`, `claude` | One Foundry account per agent |
+| Guest egress | `strict` tier + `ACQ_EGRESS_PIN` = the agent's Foundry host | `strict` alone allows every kit's hosts; the pin is applied last, so kit changes cannot widen it |
 | Model auth | API keys, host-side injection | Guest never holds a key or an identity; Entra tokens expire hourly |
 | Keys | One Foundry account per agent | An account has only two keys; separate accounts give each agent its own revocable key and quota |
 | Quotas | Per-deployment TPM capacity | Caps token burn by a runaway agent |
-| Images | Mirrored to private ACR, pinned by digest | Host never talks to Docker Hub; images cannot change between runs |
+| Images | Docker `sandbox-templates` with the agent prebuilt, mirrored to private ACR, pinned by digest | Host never talks to Docker Hub; images cannot change between runs; acq's default opencode base installs opencode from npm at first boot, which pinned egress blocks |
 | Reset | Fresh sandbox per run, golden-image rebuild per campaign | Nothing persists between runs or campaigns |
 | Logs | AMA -> DCE -> Log Analytics over AMPLS (PrivateOnly) | Evidence leaves the host before a model can touch it |
 | Access | Entra ID via Bastion; standing "VM User Login", JIT "VM Administrator Login" via PIM | No SSH keys, no standing sudo |

@@ -1257,6 +1257,84 @@ $(kit_spec_net_allow "$_spec")
 EOF
 }
 
+# Egress pin (opt-in, for hosts that treat the agent as adversarial)
+# ---------------------------------------------------------------------------
+# The strict tier is deny-by-default plus the UNION of every applied kit's
+# caps.network.allow, so the guest can still reach whatever any kit asks for
+# (every known LLM provider, GitHub, npm, ...). ACQ_EGRESS_PIN is a
+# space-separated list of exact hostnames that is the final word on egress:
+# applied once, after all kits have contributed, it drops every `allow@` rule
+# whose host is not pinned (the `allow@dns` resolver rule is kept), adds a rule
+# for any pinned host no kit asked for, and denies default ingress when nothing
+# is published. Kit startup steps that need an unpinned host (e.g. the playbook
+# fetch) fail closed instead of widening egress.
+#
+# Usage: _acq_msb_apply_egress_pin ARRVAR  (ARRVAR is the create-flag array)
+_acq_msb_apply_egress_pin() {
+  local _arr="$1" _pin="${ACQ_EGRESS_PIN:-}" _h _t
+  [ -n "$_pin" ] || return 0
+  if [ "$ACQ_NETWORK_TIER" != strict ]; then
+    echo "acq(msb): error: ACQ_EGRESS_PIN requires ACQ_NETWORK_TIER=strict (got '$ACQ_NETWORK_TIER')." >&2
+    return 1
+  fi
+  local _pinned=" "
+  for _h in $_pin; do
+    case "$_h" in
+      *"*"*|*:*)
+        echo "acq(msb): error: ACQ_EGRESS_PIN entries must be exact hostnames without ports: $_h" >&2
+        return 1
+        ;;
+    esac
+    _t=$(_acq_msb_balanced_target "$_h" "egress pin entry") || return 1
+    _pinned="${_pinned}${_t} "
+  done
+
+  local _in=() _out=() _i=0 _tok _val _host _dropped=0 _have=" " _publishes=0
+  eval "_in=(\"\${${_arr}[@]}\")"
+  while [ "$_i" -lt "${#_in[@]}" ]; do
+    _tok="${_in[$_i]}"
+    case "$_tok" in
+      --net-rule)
+        _val="${_in[$((_i + 1))]:-}"
+        _i=$((_i + 2))
+        case "$_val" in
+          allow@dns) _out+=(--net-rule "$_val"); continue ;;
+          allow@*)
+            _host="${_val#allow@}"; _host="${_host%%:*}"
+            case "$_pinned" in
+              *" $_host "*)
+                # Several kits may allow the same pinned host; emit it once.
+                case "$_have" in
+                  *" $_host "*) : ;;
+                  *) _out+=(--net-rule "$_val"); _have="${_have}${_host} " ;;
+                esac
+                ;;
+              *) _dropped=$((_dropped + 1)) ;;
+            esac
+            continue
+            ;;
+        esac
+        _out+=(--net-rule "$_val")
+        continue
+        ;;
+      -p|--publish) _publishes=1 ;;
+    esac
+    _out+=("$_tok")
+    _i=$((_i + 1))
+  done
+
+  for _h in $_pinned; do
+    case "$_have" in
+      *" $_h "*) : ;;
+      *) _out+=(--net-rule "allow@${_h}") ;;
+    esac
+  done
+  [ "$_publishes" -eq 1 ] || _out+=(--net-default-ingress deny)
+
+  echo "acq(msb): egress pinned to:${_pinned% } (dropped ${_dropped} kit rule(s))" >&2
+  eval "${_arr}=(\"\${_out[@]}\")"
+}
+
 # _acq_msb_balanced_target HOST [CONTEXT] — echo the msb `--net-rule` TARGET for
 # one host token, or nothing (rc 1) if it must be dropped. CONTEXT labels warnings
 # and defaults to "balanced entry" for the baseline caller. Translates the
@@ -3654,6 +3732,8 @@ EOF
   # them.
   local _secret_env_names=()   # env vars we set transiently, cleared after create
   _acq_msb_bind_secrets_into create_flags _secret_env_names "$name"
+
+  _acq_msb_apply_egress_pin create_flags || return 1
 
   # Create the sandbox (detached; msb create boots in the background).
   # NOTE: acq runs under `set -euo pipefail`, so capture the status with

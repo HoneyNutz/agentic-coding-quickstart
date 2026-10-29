@@ -32,6 +32,14 @@ the guest:
 - [ ] `printenv` shows a placeholder, not the real key, for the key variable.
 - [ ] `curl -m 5 https://example.com` fails.
 - [ ] `curl -m 5 https://OTHER_SUB.openai.azure.com` (another agent's account) fails.
+- [ ] `curl -m 5` to `api.openai.com`, `api.anthropic.com`, `openrouter.ai`,
+      `registry.npmjs.org`, `raw.githubusercontent.com` and `api.github.com` all
+      fail (the kits allow-list these; the egress pin must remove them).
+- [ ] On the host, `msb inspect <sandbox> --format json` shows
+      `default_egress: deny`, `default_ingress: deny`, and allow rules for only
+      DNS and this agent's Foundry host.
+- [ ] `test -z "$SSH_AUTH_SOCK"` inside the guest, and no `ssh-agent.sock`
+      under `/home/agent/.acq/`.
 - [ ] `curl -m 5 http://168.63.129.16` and `http://169.254.169.254` fail
       (no Azure wireserver or IMDS from the guest).
 - [ ] After exit, `acq ls` no longer lists the sandbox and the workspace under

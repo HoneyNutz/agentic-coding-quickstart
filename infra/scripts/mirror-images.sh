@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Run on an OPERATOR workstation with the Azure CLI, from a checkout of this
-# repository at the same commit the host pins (acqCommitSha), not on the host.
+# Run on an OPERATOR workstation with the Azure CLI, not on the host.
 # Imports the acq agent images into the private ACR and prints the digests to
 # pin. `az acr import` runs server-side in Azure, so the host never talks to
-# Docker Hub or ghcr.io.
+# Docker Hub.
 #
 #   ./mirror-images.sh ACR_NAME
 #
@@ -12,18 +11,13 @@
 set -euo pipefail
 
 acr=${1:?usage: mirror-images.sh ACR_NAME}
-agents_sh="$(cd "$(dirname "$0")/../.." && pwd)/acq.backends/agents.sh"
-
-# opencode boots the digest-pinned devenv image acq defaults to; read it from
-# acq itself so the mirror always matches the pinned acq commit.
-opencode_src=$(sed -n 's/^ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE="\(.*\)"$/\1/p' "$agents_sh")
-[[ "$opencode_src" == *@sha256:* ]] || { echo "could not read ACQ_DEFAULT_OPENCODE_DEVENV_IMAGE from $agents_sh" >&2; exit 1; }
-
-# codex and claude still use Docker's sandbox-templates (acq_agent_template_image
-# in acq.backends/agents.sh). Those are tags, so the digest printed below is
+# Every image must already contain its agent. acq's default opencode base
+# (the devenv image) installs opencode from npm on first boot, which the
+# locked-down host cannot reach, so opencode uses Docker's prebuilt template
+# like codex and claude. Templates are tags, so the digest printed below is
 # what gets pinned.
 declare -A sources=(
-  [opencode]="$opencode_src"
+  [opencode]="docker.io/docker/sandbox-templates:opencode-docker"
   [codex]="docker.io/docker/sandbox-templates:codex-docker"
   [claude]="docker.io/docker/sandbox-templates:claude-code-docker"
 )

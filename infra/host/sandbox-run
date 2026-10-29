@@ -57,6 +57,20 @@ set +a
 export ACQ_BACKEND ACQ_NETWORK_TIER
 [ "$ACQ_NETWORK_TIER" = "strict" ] || die "refusing to run with ACQ_NETWORK_TIER=$ACQ_NETWORK_TIER"
 
+# strict alone still unions every kit's allow-list (all LLM providers, GitHub,
+# npm). Pin guest egress to this agent's own model endpoint and nothing else.
+[ -n "${ACQ_PROVIDER_HOST:-}" ] || die "$provider_env does not set ACQ_PROVIDER_HOST"
+export ACQ_EGRESS_PIN="$ACQ_PROVIDER_HOST"
+
+# Opt-in kits add hosts and network listeners; this host runs none.
+if grep -E -q '^extra_kits:[[:space:]]*[^[:space:]]' "$HOME/.config/acq/config.yaml" 2>/dev/null; then
+  die "$HOME/.config/acq/config.yaml enables extra_kits; remove them for adversarial runs"
+fi
+export ACQ_EXTRA_KITS=""
+
+# acq forwards a host ssh-agent into the guest whenever SSH_AUTH_SOCK is set.
+unset SSH_AUTH_SOCK
+
 # Concurrency cap: hold one of MAX_SANDBOXES slot locks for the whole run.
 mkdir -p "$LOCK_DIR"
 slot=""

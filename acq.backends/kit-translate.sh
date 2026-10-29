@@ -187,7 +187,8 @@ _kit_translate_prepare_orig() {
   local kitdir="$1" file="$2"
   [ -f "$file" ] || return 1
   rm -f "${file}.orig" 2>/dev/null || true
-  local orig="$kitdir/.orig-$(basename "$file")"
+  local orig
+  orig="$kitdir/.orig-$(basename "$file")"
   if git -C "$kitdir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git -C "$kitdir" checkout -f -- "$file" >/dev/null 2>&1 || true
   elif [ -f "$orig" ]; then

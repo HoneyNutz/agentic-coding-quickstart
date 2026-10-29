@@ -11,6 +11,7 @@ param(
     [string]$PackageUrl = "",
     [string]$Sha256 = "",
     [string]$MsbPackageId = $env:ACQ_MSB_WINGET_ID,
+    [switch]$FromClone,
     [switch]$NoMsb,
     [switch]$NoPath,
     [switch]$SkipWhpCheck,
@@ -62,6 +63,8 @@ Options:
   -Version <version>      Release version to install. Default: $Version
   -InstallDir <path>      User-writable install location. Default: $InstallDir
   -PackageUrl <url>       Override the acq zip URL. Requires -Sha256 for verification.
+  -FromClone              Install the clone this script lives in, unverified.
+                          Only for a checkout you have reviewed yourself.
   -Sha256 <hash>          Expected SHA-256 for -PackageUrl.
   -MsbPackageId <id>      Optional WinGet package ID for msb when available.
   -NoMsb                 Do not install the msb runtime.
@@ -637,25 +640,21 @@ function Get-ExpectedPackageHash {
 }
 
 function Install-AcqZip {
-    # If install.ps1 is executed directly from a local clone of the repository:
-    $candidateRoots = @()
-    if ($PSCommandPath) { $candidateRoots += (Split-Path -Parent $PSCommandPath) }
-    if ($PSScriptRoot)  { $candidateRoots += $PSScriptRoot }
-    try {
-        if ($PWD) { $candidateRoots += $PWD.Path }
-        $loc = (Get-Location).Path
-        if ($loc) { $candidateRoots += $loc }
-    } catch {}
-
+    # Installing from a local clone skips verification, so it is opt-in and only
+    # ever uses the directory this script lives in. The current directory is
+    # never trusted: piping the installer from a folder that happens to hold an
+    # `acq` file must not install that file.
     $localRepoRoot = ""
-    foreach ($candidate in $candidateRoots) {
-        if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate "acq") -PathType Leaf)) {
-            $localRepoRoot = $candidate
-            break
+    if ($FromClone) {
+        if ($PackageUrl) { throw "-FromClone and -PackageUrl are mutually exclusive." }
+        $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { "" }
+        if (-not $scriptDir -or -not (Test-Path -LiteralPath (Join-Path $scriptDir "acq") -PathType Leaf)) {
+            throw "-FromClone needs install.ps1 to be run from inside a clone of the repository (e.g. .\install.ps1 -FromClone)."
         }
+        $localRepoRoot = $scriptDir
     }
 
-    if ($localRepoRoot -and -not $PackageUrl) {
+    if ($localRepoRoot) {
         Write-Host "  Installing acq from local repository ($localRepoRoot)"
         Invoke-InstallCommand "copy acq from $localRepoRoot to $InstallDir" {
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null

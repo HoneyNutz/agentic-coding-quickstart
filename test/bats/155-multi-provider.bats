@@ -330,4 +330,3 @@ MJS
   export XDG_CONFIG_HOME="$STUBDIR/xdg-change"
   assert_equal "$(_acq_config_read_field provider)" "openrouter"
 }
-

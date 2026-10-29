@@ -240,3 +240,11 @@ teardown() {
   assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }
+
+@test "windows installer: local-clone install is opt-in and never trusts the current directory" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" '\[switch\]\$FromClone'
+  run grep -E '\$PWD|Get-Location' "$REPO_ROOT/install.ps1"
+  assert_failure
+}

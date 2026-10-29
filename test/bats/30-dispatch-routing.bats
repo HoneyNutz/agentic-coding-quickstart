@@ -222,7 +222,7 @@ FACTS
   rm -f "$STUBDIR/.created"
   run bash -c 'printf "\n" | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$1" run opencode "$2"' _ "$ACQ" "$proj"
   assert_failure
-  assert_output --partial 'no USAi API key stored'
+  assert_output --partial 'no LLM API key stored'
   refute_output --partial 'Set it now'
   refute_output --partial 'invalid or expired'
   assert [ ! -f "$STUBDIR/.created" ]
@@ -233,7 +233,7 @@ FACTS
   rm -f "$STUBDIR/.created"
   run bash -c 'printf "\n" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
   assert_failure
-  assert_output --partial 'no USAi API key stored'
+  assert_output --partial 'no LLM API key stored'
   refute_regex "$(cat "$CALLS")" 'sbx create'
   assert [ ! -f "$STUBDIR/.created" ]
 }
@@ -257,7 +257,7 @@ FACTS
   run bash -c 'printf "" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
   assert_failure
   assert_output --partial 'cannot be read or decrypted'
-  refute_output --partial 'no USAi API key stored'
+  refute_output --partial 'no LLM API key stored'
   refute_regex "$(cat "$CALLS")" 'sbx create'
   assert [ ! -f "$STUBDIR/.created" ]
 }
@@ -319,7 +319,7 @@ FACTS
   local proj="$STUBDIR/kc-ci"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
   run bash -c 'printf "" | USAI_API_KEY="usai-key-stub" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
-  refute_output --partial 'no USAi API key stored'
+  refute_output --partial 'no LLM API key stored'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
 }

@@ -290,6 +290,10 @@ Invoke-WebRequest "https://github.com/HoneyNutz/agentic-coding-quickstart/archiv
 .\install.ps1 -Ref $Ref -Sha256 <hash>
 ```
 
+To install a clone you have checked out and reviewed yourself, run its own
+installer with `.\install.ps1 -FromClone`. That path skips verification, so it is
+opt-in, and it only ever uses the directory the script lives in.
+
 > **Adversarial model testing:** the Windows path is a preview. For red-teaming
 > or other work that treats the model as hostile, use a Linux (RHEL 9) KVM host;
 > see [`infra/`](../../infra/README.md) for the hardened Azure deployment.

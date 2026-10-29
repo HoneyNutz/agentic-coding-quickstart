@@ -4172,6 +4172,9 @@ _acq_configure_provider() {
 # for the GitHub-token-scoping default, and persists both to config.yaml
 # (preserving the `backend:` key). Also accepts `--provider <id>` to configure
 # the default generative LLM provider directly.
+# The entry point (acq) calls this with "$@" for `acq configure --provider ...`;
+# The linter only sees the argument-less call below, so it misreads SC2120.
+# shellcheck disable=SC2120
 acq_configure() {
   if [ "$#" -gt 0 ]; then
     _acq_configure_provider "$@"

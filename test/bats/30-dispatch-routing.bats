@@ -222,7 +222,7 @@ FACTS
   rm -f "$STUBDIR/.created"
   run bash -c 'printf "\n" | STUB_KEY_STATUS=401 ACQ_BACKEND=sbx "$1" run opencode "$2"' _ "$ACQ" "$proj"
   assert_failure
-  assert_output --partial 'no USAi API key stored'
+  assert_output --partial 'no LLM API key stored'
   refute_output --partial 'Set it now'
   refute_output --partial 'invalid or expired'
   assert [ ! -f "$STUBDIR/.created" ]
@@ -233,7 +233,7 @@ FACTS
   rm -f "$STUBDIR/.created"
   run bash -c 'printf "\n" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
   assert_failure
-  assert_output --partial 'no USAi API key stored'
+  assert_output --partial 'no LLM API key stored'
   refute_regex "$(cat "$CALLS")" 'sbx create'
   assert [ ! -f "$STUBDIR/.created" ]
 }
@@ -257,7 +257,7 @@ FACTS
   run bash -c 'printf "" | ACQ_BACKEND=sbx "$1" create opencode "$2"' _ "$ACQ" "$proj"
   assert_failure
   assert_output --partial 'cannot be read or decrypted'
-  refute_output --partial 'no USAi API key stored'
+  refute_output --partial 'no LLM API key stored'
   refute_regex "$(cat "$CALLS")" 'sbx create'
   assert [ ! -f "$STUBDIR/.created" ]
 }
@@ -319,7 +319,7 @@ FACTS
   local proj="$STUBDIR/kc-ci"; mkdir -p "$proj"
   rm -f "$STUBDIR/.msb_created"
   run bash -c 'printf "" | USAI_API_KEY="usai-key-stub" ACQ_BACKEND=msb "$1" create opencode "$2"' _ "$ACQ" "$proj"
-  refute_output --partial 'no USAi API key stored'
+  refute_output --partial 'no LLM API key stored'
   assert_regex "$(cat "$CALLS")" 'msb create'
   assert [ -f "$STUBDIR/.msb_created" ]
 }
@@ -386,15 +386,28 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'Authorization: Bearer \$USAI_API_KEY'
 }
 
-@test "run(opencode): runs postinstall under a timeout guard when binary not functional" {
+@test "run(opencode): generic default does not run an unpinned npm postinstall fallback" {
   local proj="$STUBDIR/ocrun"; mkdir -p "$proj"
   _seed_usai
   run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'postinstall\.mjs'
-  assert_regex "$log" 'timeout'
+  refute_regex "$log" 'postinstall\.mjs|opencode-ai|npm root -g'
   refute_output --partial 'does not appear runnable'
+}
+
+@test "run(opencode): generic default reattach does not run an unpinned npm postinstall fallback" {
+  local proj="$STUBDIR/ocreattach"; mkdir -p "$proj"
+  _seed_usai
+  run env STUB_KEY_STATUS=200 ACQ_BACKEND=sbx "$ACQ" create opencode --name ocreattach "$proj"
+  assert_success
+  printf 'ocreattach\n' >"$STUBDIR/.sandbox_list"
+  : >"$CALLS"
+
+  run env ACQ_UPDATE_CHECK=0 ACQ_BACKEND=sbx "$ACQ" run ocreattach
+
+  assert_success
+  refute_regex "$(cat "$CALLS")" 'postinstall\.mjs|opencode-ai|npm root -g'
 }
 
 @test "run(opencode): skips postinstall when already runnable" {
@@ -490,7 +503,7 @@ FACTS
   assert_output --partial 'ACQ_ACTIVATE_PROJECT_ENV=1'
   local log; log=$(cat "$CALLS")
   local run_line; run_line=$(grep '^sbx run --name opencode-direnvproj' "$CALLS")
-  assert_regex "$run_line" 'sbx run --name opencode-direnvproj -- echo hi'
+  assert_regex "$run_line" 'sbx run --name opencode-direnvproj shell -- -lc exec.*sh echo hi'
   refute_regex "$log" 'direnv export|direnv allow'
 }
 
@@ -502,7 +515,7 @@ FACTS
   assert_success
   assert_output --partial 'project environment detected (direnv)'
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj2 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj2 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'direnv export sh'
   assert_regex "$log" 'sh opencode --version'
   refute_regex "$log" 'direnv allow'
@@ -515,7 +528,7 @@ FACTS
   run env ACQ_BACKEND=sbx ACQ_ACTIVATE_PROJECT_ENV=1 "$ACQ" run opencode "$proj"
   assert_success
   local log; log=$(cat "$CALLS")
-  assert_regex "$log" 'sbx run --name opencode-direnvproj3 -- env ACQ_WORKSPACE=.* sh -c'
+  assert_regex "$log" 'sbx run --name opencode-direnvproj3 shell -- -lc exec.*sh env ACQ_WORKSPACE=.* sh -c'
   assert_regex "$log" 'sh opencode'
 }
 
@@ -620,13 +633,13 @@ FACTS
   assert_regex "$(cat "$CALLS")" 'acq-opencode-kit'
 }
 
-@test "agent-kits: explicit --kit suppresses implicit selection notice" {
+@test "agent-kits: explicit --kit still reports the selected agent kit" {
   local proj="$STUBDIR/agentkit-explicit"; mkdir -p "$proj"
   _seed_usai
   run env ACQ_BACKEND=sbx "$ACQ" run opencode --kit /tmp/team-opencode "$proj"
 
   assert_success
-  refute_output --partial 'built-in agent kit candidate'
+  assert_output --partial 'selected built-in agent kit: agent=opencode kit=opencode'
   local create_line; create_line=$(grep '^sbx create' "$CALLS")
   assert_regex "$create_line" '--kit /tmp/team-opencode'
   refute_regex "$create_line" 'acq-kits/opencode'

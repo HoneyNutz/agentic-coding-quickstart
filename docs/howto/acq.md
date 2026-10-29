@@ -262,7 +262,7 @@ reboot the machine.
 <!-- x-release-please-start-version -->
 
 ```powershell
-irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.0.1/install.ps1 | iex
+irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.1.1/install.ps1 | iex
 ```
 
 <!-- x-release-please-end -->
@@ -270,13 +270,33 @@ irm https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v4.0.
 For an inspect-first install:
 
 ```powershell
-$AcqVersion = "4.0.1" # x-release-please-version
+$AcqVersion = "4.1.1" # x-release-please-version
 $BaseUrl = "https://github.com/GSA-TTS/agentic-coding-quickstart/releases/download/v$AcqVersion"
 Invoke-WebRequest "$BaseUrl/install.ps1" -OutFile install.ps1
 Get-Content .\install.ps1
 .\install.ps1 -DryRun
 .\install.ps1
 ```
+
+The installer fails closed: it only installs a zip whose SHA-256 it can verify.
+A release without `SHA256SUMS` is refused, and it never falls back to an
+unpinned branch archive. To install a fork (or any commit) that has no published
+release, pin the commit and its archive hash:
+
+```powershell
+$Ref = "<40-character commit SHA>"
+Invoke-WebRequest "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/$Ref.zip" -OutFile acq.zip
+(Get-FileHash -Algorithm SHA256 .\acq.zip).Hash   # record this hash
+.\install.ps1 -Ref $Ref -Sha256 <hash>
+```
+
+To install a clone you have checked out and reviewed yourself, run its own
+installer with `.\install.ps1 -FromClone`. That path skips verification, so it is
+opt-in, and it only ever uses the directory the script lives in.
+
+> **Adversarial model testing:** the Windows path is a preview. For red-teaming
+> or other work that treats the model as hostile, use a Linux (RHEL 9) KVM host;
+> see [`infra/`](../../infra/README.md) for the hardened Azure deployment.
 
 Running `.\install.ps1` (and the installed `acq`, via `acq.cmd`) requires a
 PowerShell **execution policy** that permits local scripts. Windows 11 client

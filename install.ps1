@@ -6,11 +6,13 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "4.0.1", # x-release-please-version
+    [string]$Version = "4.1.1", # x-release-please-version
     [string]$InstallDir = "",
     [string]$PackageUrl = "",
     [string]$Sha256 = "",
+    [string]$Ref = "",
     [string]$MsbPackageId = $env:ACQ_MSB_WINGET_ID,
+    [switch]$FromClone,
     [switch]$NoMsb,
     [switch]$NoPath,
     [switch]$SkipWhpCheck,
@@ -22,6 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ReleaseBaseUrl = "https://github.com/HoneyNutz/agentic-coding-quickstart/releases/download/v$Version"
 $PackageName = "acq-windows-x64.zip"
+$RepoArchiveBaseUrl = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive"
 
 # msb version policy. Keep in lockstep with install.sh and acq.backends/msb.sh:
 # a drift here means Windows accepts an msb the rest of acq refuses.
@@ -57,12 +60,17 @@ install.ps1 - install acq for Windows preview hosts
 Usage:
   irm https://raw.githubusercontent.com/HoneyNutz/agentic-coding-quickstart/main/install.ps1 | iex
   .\install.ps1 [-Version <version>] [-InstallDir <path>] [-NoMsb] [-SkipWhpCheck] [-DryRun] [-Yes]
+  .\install.ps1 -Ref <commit> -Sha256 <hash> [options]
 
 Options:
   -Version <version>      Release version to install. Default: $Version
   -InstallDir <path>      User-writable install location. Default: $InstallDir
   -PackageUrl <url>       Override the acq zip URL. Requires -Sha256 for verification.
-  -Sha256 <hash>          Expected SHA-256 for -PackageUrl.
+  -Sha256 <hash>          Expected SHA-256 for -PackageUrl or -Ref.
+  -Ref <commit>           Install the repository archive at this 40-character
+                          commit SHA instead of a release zip. Requires -Sha256.
+  -FromClone              Install the clone this script lives in, unverified.
+                          Only for a checkout you have reviewed yourself.
   -MsbPackageId <id>      Optional WinGet package ID for msb when available.
   -NoMsb                 Do not install the msb runtime.
   -NoPath                Do not offer to add acq to the user PATH.
@@ -615,47 +623,44 @@ function Get-ExpectedPackageHash {
         throw "-PackageUrl requires -Sha256 so the downloaded zip can be verified."
     }
 
-    if ($ReleaseBaseUrl -match "HoneyNutz") {
-        return $null
+    if ($Ref) {
+        throw "-Ref requires -Sha256 so the downloaded archive can be verified."
     }
 
+    # Fail closed: a release without SHA256SUMS (or without an entry for the
+    # package) is never installed unverified.
     $sumsUrl = "$ReleaseBaseUrl/SHA256SUMS"
     try {
         $sums = Invoke-RestMethod $sumsUrl
-        foreach ($line in ($sums -split "`n")) {
-            if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
-                return $Matches[1].ToLowerInvariant()
-            }
-        }
     }
     catch {
-        # SHA256SUMS not present (e.g. running on fork without published releases)
-        return $null
+        throw "Could not fetch $sumsUrl, so $PackageName cannot be verified. Pass -Ref <commit> -Sha256 <hash> to install a pinned commit instead."
+    }
+    foreach ($line in ($sums -split "`n")) {
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($PackageName))$") {
+            return $Matches[1].ToLowerInvariant()
+        }
     }
 
-    return $null
+    throw "$sumsUrl has no entry for $PackageName, so it cannot be verified."
 }
 
 function Install-AcqZip {
-    # If install.ps1 is executed directly from a local clone of the repository:
-    $candidateRoots = @()
-    if ($PSCommandPath) { $candidateRoots += (Split-Path -Parent $PSCommandPath) }
-    if ($PSScriptRoot)  { $candidateRoots += $PSScriptRoot }
-    try {
-        if ($PWD) { $candidateRoots += $PWD.Path }
-        $loc = (Get-Location).Path
-        if ($loc) { $candidateRoots += $loc }
-    } catch {}
-
+    # Installing from a local clone skips verification, so it is opt-in and only
+    # ever uses the directory this script lives in. The current directory is
+    # never trusted: piping the installer from a folder that happens to hold an
+    # `acq` file must not install that file.
     $localRepoRoot = ""
-    foreach ($candidate in $candidateRoots) {
-        if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate "acq") -PathType Leaf)) {
-            $localRepoRoot = $candidate
-            break
+    if ($FromClone) {
+        if ($PackageUrl -or $Ref) { throw "-FromClone cannot be combined with -PackageUrl or -Ref." }
+        $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { "" }
+        if (-not $scriptDir -or -not (Test-Path -LiteralPath (Join-Path $scriptDir "acq") -PathType Leaf)) {
+            throw "-FromClone needs install.ps1 to be run from inside a clone of the repository (e.g. .\install.ps1 -FromClone)."
         }
+        $localRepoRoot = $scriptDir
     }
 
-    if ($localRepoRoot -and -not $PackageUrl) {
+    if ($localRepoRoot) {
         Write-Host "  Installing acq from local repository ($localRepoRoot)"
         Invoke-InstallCommand "copy acq from $localRepoRoot to $InstallDir" {
             New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -673,45 +678,34 @@ function Install-AcqZip {
         return
     }
 
-    $url = if ($PackageUrl) { $PackageUrl } else { "$ReleaseBaseUrl/$PackageName" }
+    if ($Ref -and $PackageUrl) {
+        throw "-Ref and -PackageUrl are mutually exclusive."
+    }
+    if ($Ref -and $Ref -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "-Ref must be a full 40-character commit SHA, not a branch or tag name."
+    }
+
+    # Never fall back to an unpinned branch archive: the only sources are a
+    # release zip (verified against SHA256SUMS), -PackageUrl, or a pinned -Ref,
+    # and every one of them is SHA-256 verified before it is expanded.
+    $url = if ($PackageUrl) { $PackageUrl } elseif ($Ref) { "$RepoArchiveBaseUrl/$Ref.zip" } else { "$ReleaseBaseUrl/$PackageName" }
     $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acq-install-" + [guid]::NewGuid().ToString("N"))
     $zipPath = Join-Path $tmpRoot $PackageName
     $extractDir = Join-Path $tmpRoot "extract"
-    $isArchive = $false
-
-    # Check if pre-built release package exists, or fall back to branch archive:
-    if ($ReleaseBaseUrl -match "HoneyNutz" -and -not $PackageUrl) {
-        $isArchive = $true
-        $url = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/refs/heads/main.zip"
-    }
-    elseif (-not $PackageUrl) {
-        try {
-            $check = Invoke-WebRequest -Uri $url -Method Head -ErrorAction Stop
-        }
-        catch {
-            $isArchive = $true
-            $url = "https://github.com/HoneyNutz/agentic-coding-quickstart/archive/refs/heads/main.zip"
-        }
-    }
 
     try {
         Invoke-InstallCommand "download $url" {
             New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
-            if ($isArchive) {
-                Write-Host "  Downloading latest repository archive from $url"
-            }
             Invoke-WebRequest -Uri $url -OutFile $zipPath
         }
 
-        if (-not $DryRun -and -not $isArchive) {
+        if (-not $DryRun) {
             $expected = Get-ExpectedPackageHash
-            if ($expected) {
-                $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
-                if ($actual -ne $expected) {
-                    throw "SHA-256 verification failed for $PackageName. Expected $expected, got $actual."
-                }
-                Write-Host "  verified $PackageName SHA-256: $actual"
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+            if ($actual -ne $expected) {
+                throw "SHA-256 verification failed for $url. Expected $expected, got $actual."
             }
+            Write-Host "  verified $url SHA-256: $actual"
         }
 
         Invoke-InstallCommand "expand $zipPath to $InstallDir" {

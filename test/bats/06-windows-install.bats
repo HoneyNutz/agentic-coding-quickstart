@@ -240,3 +240,24 @@ teardown() {
   assert_regex "$workflow" 'sha256sum install\.sh install\.ps1 acq-windows-x64\.zip > SHA256SUMS'
   assert_regex "$workflow" 'dist/acq-windows-x64\.zip'
 }
+
+@test "windows installer: never installs an unpinned or unverified archive" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  # No branch-archive fallback and no fork-specific checksum bypass.
+  run grep -E 'refs/heads/|-match "HoneyNutz"' "$REPO_ROOT/install.ps1"
+  assert_failure
+
+  # -Ref is commit-pinned and, like -PackageUrl, requires -Sha256.
+  assert_regex "$installer" '\^\[0-9a-fA-F\]\{40\}\$'
+  assert_regex "$installer" '-Ref requires -Sha256'
+  assert_regex "$installer" 'cannot be verified'
+}
+
+@test "windows installer: local-clone install is opt-in and never trusts the current directory" {
+  installer=$(cat "$REPO_ROOT/install.ps1")
+
+  assert_regex "$installer" '\[switch\]\$FromClone'
+  run grep -E '\$PWD|Get-Location' "$REPO_ROOT/install.ps1"
+  assert_failure
+}

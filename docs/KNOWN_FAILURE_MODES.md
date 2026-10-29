@@ -3,7 +3,7 @@ title: "Known Failure Modes"
 description: "Real-world failure patterns when using Docker SBX + USAi + agent frameworks"
 status: canonical
 tier: 2
-last_updated: "2026-10-03"
+last_updated: "2026-10-22"
 audience: "developers"
 keywords: ["debugging", "troubleshooting", "sbx", "usai", "failures"]
 ---
@@ -222,6 +222,9 @@ Agent assumes host filesystem layout, not container layout.
 - Requests never return
 - Agent appears stuck
 - Eventually fails with timeout
+- OpenCode shows a retry notice for a streamed-response read timeout: `Timed out
+  waiting for response data` on OpenCode 2.0.30 (the version the kit installs),
+  `SSE read timed out` on 1.18.x
 
 ### Root Cause
 
@@ -229,16 +232,45 @@ Agent assumes host filesystem layout, not container layout.
 - Network routing issues inside container
 - DNS resolution failures
 - Proxy misconfiguration
+- Streamed-response read timeout: the response sent no data for longer than the
+  provider's `chunkTimeout`. OpenCode before 1.18.27 has no default for this option
+  (unset means no idle timeout; 1.18.27 through 2.0.29 default to 5 minutes, 2.0.30
+  to 15), so on those versions the 2-minute value the `usai-provider` kit sets is
+  what makes it fire.
+  Common during long reasoning or while the model generates a large tool call (such
+  as writing a long file), or when a hop on the path (sandbox proxy, Zscaler, USAi,
+  the upstream model) stalls. OpenCode retries automatically, so an occasional one
+  is harmless.
 
 ### Fix
 
-Set explicit timeouts in config:
+The `usai-provider` kit sets both timeouts under the provider's `options` in its
+[`opencode.jsonc`](https://github.com/GSA-TTS/agentic-coding-patterns/blob/v1.16.1/integrations/isolation/acq-kits/usai-provider/files/home/usai-config/opencode.jsonc):
+`timeout` (whole request, 10 minutes) and `chunkTimeout` (gap between streamed
+chunks, 2 minutes); check that file for the current values. If the read timeout
+recurs, raise `chunkTimeout` in the project's `opencode.json`. The example below
+uses 5 minutes, the default from OpenCode 1.18.27 through 2.0.29; `false` disables the
+idle timeout entirely. A higher value makes a truly hung stream take longer to fail
+over to the retry. Do not set it to a few seconds: normal model pauses would then
+abort nearly every long response.
+
 ```json
 {
-  "requestTimeout": 30000,
-  "chunkTimeout": 5000
+  "provider": {
+    "usai": {
+      "options": {
+        "chunkTimeout": 300000
+      }
+    }
+  }
 }
 ```
+
+If the retries run out (OpenCode 2.0.30 gives up after three retries of a timed-out
+request, while other retryable errors follow a separate policy; 1.18.17 through the
+1.18.x line stop after five; earlier releases keep retrying until you abort), note
+the model, the time, and what the agent was doing, so a slow model can be told
+apart from a network stall.
 
 Check network connectivity from inside container:
 ```bash
@@ -1644,6 +1676,48 @@ calls against a 0.6.9+ binary, `allow@dns` is safe to use directly.
 
 ---
 
+## 32.1. An Existing msb Sandbox Opens a Shell or `/home/agent` After Upgrading acq
+
+### Symptoms
+
+After upgrading acq, a name-only `acq run <sandbox>` against an existing msb
+sandbox opens a plain shell instead of its configured agent, or starts in
+`/home/agent` rather than the mounted workspace. The first resume may also
+re-run idempotent kit install and agent-user setup steps.
+
+### Root Cause
+
+ADR-0035 moves session configuration and run-once gates from guest-writable
+`/var/lib/acq` markers to the host-authoritative config store. Sandboxes created
+before that migration have no host-config keys. acq must not import their old
+guest markers because a passwordless-sudo agent can forge those values.
+
+### Fix
+
+Current acq releases recover the agent and workspace from their existing trusted
+host provenance record when the new host-config keys are absent. The regular
+`acq run`, `acq start`, and `acq restart` heal also reapplies the effective kit
+set, rebuilding kit environment entries and safely re-running missing
+idempotency gates once. SSH-agent forwarding is re-established during the same
+heal when configured.
+
+If the provenance record is missing or the replay fails, recreate the sandbox
+from its workspace:
+
+```bash
+acq rm <sandbox>
+acq run <agent> <workspace>
+```
+
+### Prevention / Status
+
+- Fixed without trusting legacy guest state. A one-time idempotent replay after
+  upgrade is expected for a sandbox that predates the host-config migration.
+- Keep work in the mounted workspace committed or backed up before recreating a
+  sandbox; recreation discards guest-local state.
+
+---
+
 ## 33. `--kit` Services Dead After a Resume/Reboot on msb — Ports Mapped, Nothing Listening
 
 ### Symptoms
@@ -1771,7 +1845,7 @@ For a single sandbox, pass the pinned kit ref with `--kit` or include it in
 `ACQ_EXTRA_KITS`:
 
 ```bash
-acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=56d1f5f49ef928f50e61aa64a93d618b3d21c415&dir=integrations/isolation/acq-kits/oci-engine'
+acq run opencode . --kit 'git+https://github.com/GSA-TTS/agentic-coding-patterns.git#ref=d2674db8b424402e912e95254d6b194a062deb73&dir=integrations/isolation/acq-kits/oci-engine'
 ```
 
 Existing sandboxes that were created before this change keep whatever podman
@@ -1847,11 +1921,12 @@ sandbox, and it starts working again as soon as you
 `export SSH_AUTH_SOCK=/home/agent/.acq/ssh-agent.sock` by hand. Here the vsock
 route and the `socat` bridge are fine — what is missing is the
 **`SSH_AUTH_SOCK` env var in the agent's process**. acq injects that var
-(`-e SSH_AUTH_SOCK=…`) only when the persisted `/var/lib/acq/ssh-auth-sock`
-marker is present, and before the fix nothing re-established the bridge or wrote
-that marker when re-attaching to an already-running sandbox (the heal's
-start-if-stopped block is a no-op on a running sandbox, and only that path — or
-provision — wrote the marker).
+(`-e SSH_AUTH_SOCK=…`) only when the persisted ssh-agent sock value is present
+(recorded host-side in acq's per-sandbox config store, ADR-0035; originally a
+guest `/var/lib/acq/ssh-auth-sock` marker), and before the fix nothing
+re-established the bridge or wrote that value when re-attaching to an
+already-running sandbox (the heal's start-if-stopped block is a no-op on a
+running sandbox, and only that path — or provision — wrote it).
 
 Fixed in `acq.backends/msb.sh`: `acq_backend_ensure_kits_applied` now calls
 `_acq_msb_ensure_ssh_agent_forward` at the top of the heal, which re-drives the
@@ -1888,15 +1963,26 @@ socket path, so the persisted route now points at a dead host endpoint. This is
 distinct from the previous variant: there the guest env var was missing; here the
 env var and bridge are present but the route's host end is dead.
 
-`acq` now **detects and reports** this instead of leaving a silent dead bridge:
-after (re)starting the bridge, `_acq_msb_start_ssh_agent_bridge` runs a liveness
-probe (`ssh-add -l` over the guest sock) and, on failure, prints an actionable
-warning naming the host-reboot cause and the remedy. Because the bridge's
-listener socket is present (only its vsock backend is dead), `ssh-add` exits **1**
-with `communication with agent failed` here — the same exit code as a healthy but
-empty agent, so the probe classifies on the message (a "no identities" reply is
-treated as healthy and stays quiet). The `--vsock` route is create-time only, so
-the fix is to **recreate the sandbox** to refresh the route:
+`acq` **heals this on start** for sandboxes created since the managed-link
+amendment of ADR-0021: the `--vsock` route names a per-sandbox symlink under
+`~/.local/state/acq/msb/ssh-agent/` rather than the raw agent path, and every
+`acq start` / `acq restart` / `acq run` re-points that link at the current host
+`SSH_AUTH_SOCK` before starting the bridge (msb dials the path per connection and
+follows the symlink, so no recreate is needed). If the agent moved while the
+sandbox kept running, re-run `acq run <sandbox>` (or `acq restart <sandbox>`) to
+re-point it.
+
+A sandbox created **before** that amendment still carries the raw path in its
+persisted route, which acq cannot change. For it, acq **detects and reports**
+rather than leaving a silent dead bridge: after (re)starting the bridge,
+`_acq_msb_start_ssh_agent_bridge` runs a liveness probe (`ssh-add -l` over the
+guest sock) and, on failure, prints a warning naming the host-reboot cause and the
+remedy. Because the bridge's listener socket is present (only its vsock backend
+is dead), `ssh-add` exits **1** with `communication with agent failed` here — the
+same exit code as a healthy but empty agent, so the probe classifies on the
+message (a "no identities" reply is treated as healthy and stays quiet). The fix
+is a **one-time recreate**; the recreated sandbox routes through the managed link
+and self-heals from then on:
 
 ```bash
 acq rm <sandbox>
@@ -1905,8 +1991,14 @@ eval "$(ssh-agent -s)"; ssh-add ~/.ssh/id_ed25519   # if needed
 acq run <agent> <workspace…>
 ```
 
+If the warning fires for a sandbox that already routes through the managed link
+(the message names the link path), the link was just re-pointed, so look at the
+host agent itself (`ssh-add -l` on the host) or the in-guest `socat` bridge
+rather than recreating.
+
 See [ADR-0021](adr/0021-msb-host-ssh-agent-forwarding-via-vsock.md)
-("Re-attach to a running sandbox") for the full mechanism.
+("Amendment (2026-10-06): reboot-proof route via a managed host symlink") for the
+full mechanism.
 
 ---
 
@@ -2752,6 +2844,57 @@ Two other things in the same code path can also look like a hang:
 
 ---
 
+## 45. "has no ssh-agent --vsock route" Warning on a Sandbox That Has the Route
+
+**Status:** Fixed — the route probe no longer pipes into `grep -q`, and a failed
+`msb inspect` is reported as "could not verify", not as a missing route.
+
+### Symptoms
+
+`acq run`, `acq start`, or `acq restart` on an existing msb sandbox sometimes
+prints:
+
+```text
+acq(msb): warning: host SSH_AUTH_SOCK is set, but existing sandbox '<name>' has no ssh-agent --vsock route. ...
+```
+
+even though `msb inspect <name> --format json` shows the `vsock` route and
+`acq exec <name> -- ssh-add -l` lists the host's keys. On msb 0.7.8 it fired on
+roughly 1 in 3 `acq run`s and on nearly every `start`/`restart`. After a start or
+restart, kit daemons launched in that run (such as the paseo daemon) come up
+without `SSH_AUTH_SOCK`, so commits signed from their sessions fail with
+`no SSH agent - cannot sign commits`.
+
+### Root Cause
+
+`acq` runs under `set -euo pipefail`. `_acq_msb_has_ssh_agent_vsock_route` checked
+the flattened inspect JSON with `printf '%s\n' "$_flat" | grep -Eq …`. `grep -q`
+exits on its first match; when the document is larger than the pipe buffer
+(a 0.7.8 inspect is about 175 KB), `printf` is still writing, dies of SIGPIPE
+(exit 141), and `pipefail` turns the successful match into a failure. The result
+depends on timing, hence the intermittent rate. Separately, a failed or empty
+`msb inspect` returned the same "no" as a missing route.
+
+### Fix
+
+- Every `grep -q` over captured output in `acq.backends/msb.sh` and
+  `acq.backends/sbx.sh` reads a here-string (`grep -q … <<<"$var"`) instead of a
+  pipe, and CLI listings (`msb list -q`, `sbx ls -q`) are captured before
+  matching rather than piped into `grep -q`.
+- The route probe returns 2 when `msb inspect` fails or prints nothing. The
+  caller retries once, and if inspect still fails it warns that it could not
+  verify the route (with inspect's stderr) instead of advising a recreate.
+
+### Prevention
+
+`test/bats/115-ssh-agent-forward.bats` runs the probe under `pipefail` against a
+large inspect document with the route near the start (this test failed before
+the fix), and covers a transient and a persistent inspect failure via the stub's
+`STUB_MSB_INSPECT_FAIL_TIMES` knob. In new code, do not pipe into `grep -q`
+(or `head`) under `pipefail` when the writer may still be producing output.
+
+---
+
 ## Contributing
 
 When you discover a new failure mode:
@@ -2761,3 +2904,26 @@ When you discover a new failure mode:
 3. Provide a minimal fix
 4. Add it to this document
 5. Consider if it indicates a gap in AGENTS.md rules
+
+---
+
+## Default OpenCode Generic Base Requires Recreation
+
+**Symptom:** An existing OpenCode sandbox still starts through an older
+OpenCode-specific template or does not receive the pinned kit behavior.
+
+**Cause:** The ADR-0030 generic base and kit composition are selected only when
+the sandbox is created. Existing sandboxes intentionally keep the image and kit
+set they were created with.
+
+**Resolution:** Recreate the sandbox from the project path:
+
+```bash
+./acq rm opencode-your-project
+./acq run opencode /path/to/your/project
+```
+
+The new default uses the pinned generic `devenv-shell` image and validates the
+pinned OpenCode kit before provisioning. If that validation fails, correct the
+pinned kit availability or metadata rather than falling back to an unpinned npm
+installation.

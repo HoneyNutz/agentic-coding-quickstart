@@ -36,8 +36,8 @@ PATTERNS_KIT_REPO="git+https://github.com/GSA-TTS/agentic-coding-patterns.git"
 # the bundle-version anchor recorded in a sandbox's host-side provenance record
 # (see ACQ_BUILTIN_BUNDLE below + the provenance helpers) so acq can tell a
 # stale sandbox from a current one.
-# agentic-coding-patterns v1.12.0 release SHA.
-PATTERNS_KIT_REF="56d1f5f49ef928f50e61aa64a93d618b3d21c415"
+# agentic-coding-patterns v1.16.1 release SHA.
+PATTERNS_KIT_REF="d2674db8b424402e912e95254d6b194a062deb73"
 PATTERNS_KIT_DIR="integrations/isolation/acq-kits"
 
 USAI_PROVIDER_KIT_NAME="usai-provider"
@@ -367,8 +367,22 @@ _acq_provider_fact_safe_url() {
   esac
   case "$1" in
     *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
-    *) return 0 ;;
   esac
+  # Keep provider facts data-only: allow RFC 3986 URL punctuation needed by
+  # configured endpoints, but reject shell syntax before facts reach a backend.
+  if ! printf '%s' "$1" | LC_ALL=C grep -qE '^https://[A-Za-z0-9._~:/?%&=+,@#-]+$'; then
+    return 1
+  fi
+  local suffix hex
+  suffix="$1"
+  while [ "${suffix#*%}" != "$suffix" ]; do
+    suffix="${suffix#*%}"
+    [ "${#suffix}" -ge 2 ] || return 1
+    hex="${suffix:0:2}"
+    case "$hex" in *[!0-9A-Fa-f]*) return 1 ;; esac
+    suffix="${suffix:2}"
+  done
+  return 0
 }
 
 acq_provider_facts_load() {
@@ -449,16 +463,25 @@ acq_provider_facts_use_fallback() {
 }
 
 acq_provider_facts_load_from_kit_or_fallback() {
-  local provider_facts_err provider_facts_rc
-  if provider_facts_err=$(acq_provider_facts_load_from_kit "$@" 2>&1); then
+  local provider_facts_rc
+  local IFS
+
+  # Keep the loader in this shell so validated provider assignments persist, but
+  # invoke it as a condition so caller errexit cannot skip status handling.
+  # Diagnostics flow directly to stderr; no temporary file or trap is needed.
+  # Use 'local IFS' (Bash 3.2-safe dynamic scoping) to preserve the caller's
+  # IFS state (including when intentionally unset under 'set -u'). The local
+  # declaration auto-restores the caller's IFS on function exit, avoiding
+  # explicit snapshot/restore that fails when IFS is unset.
+  if acq_provider_facts_load_from_kit "$@"; then
     provider_facts_rc=0
   else
     provider_facts_rc=$?
   fi
+
   case "$provider_facts_rc" in
     0) : ;;
     1)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return 1
       ;;
     2)
@@ -471,7 +494,6 @@ acq_provider_facts_load_from_kit_or_fallback() {
       acq_debug "provider facts fetch failed; using transitional fallback defaults"
       ;;
     *)
-      [ -z "$provider_facts_err" ] || printf '%s\n' "$provider_facts_err" >&2
       return "$provider_facts_rc"
       ;;
   esac
@@ -1063,8 +1085,9 @@ _acq_selected_support_kit_refs() {
 _acq_selected_builtin_kit_refs() {
   local agent="${1:-}" kit
   _acq_selected_support_kit_refs || return 1
-  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+  if [ -n "$agent" ] && acq_is_known_agent "$agent" \
+      && { [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ]; } \
+      && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     printf '%s\n' "$kit"
   fi
@@ -1072,7 +1095,6 @@ _acq_selected_builtin_kit_refs() {
 
 acq_selected_agent_kit_summary() {
   local agent="${1:-}" kit_name entrypoint install_owner start_owner apply_state="deferred"
-  [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || return 1
   kit_name=$(acq_agent_builtin_kit_name "$agent") || return 1
   entrypoint=$(acq_agent_kit_entrypoint "$agent") || entrypoint=""
   install_owner=$(acq_agent_kit_install_owner "$agent") || install_owner=""
@@ -1105,8 +1127,16 @@ _build_kit_list() {
   done < <(_acq_selected_support_kit_refs)
   # shellcheck disable=SC2034  # read by adapters/tests after _build_kit_list
   ACQ_BUILTIN_SUPPORT_KIT_COUNT="${#KITS[@]}"
-  if [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] && [ -n "$agent" ] \
-      && acq_is_known_agent "$agent" && acq_agent_builtin_kit_ready "$agent"; then
+  if [ -n "${ACQ_REQUIRED_AGENT_KIT:-}" ] \
+      && [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ] \
+      && ! acq_agent_builtin_kit_ready "$agent"; then
+    echo "acq: required built-in ${agent} kit is unavailable or has invalid agent metadata." >&2
+    echo "     Refusing the generic default image because it has no bundled ${agent} binary." >&2
+    return 1
+  fi
+  if [ -n "$agent" ] && acq_is_known_agent "$agent" \
+      && { [ "${#ACQ_CLI_KITS[@]}" -eq 0 ] || [ "${ACQ_REQUIRED_AGENT_KIT:-}" = "$agent" ]; } \
+      && acq_agent_builtin_kit_ready "$agent"; then
     kit=$(_acq_agent_builtin_kit_ref "$agent") || return 1
     KITS+=("$kit")
   fi
@@ -1344,10 +1374,11 @@ acq_guest_shell_script() {
 #
 # Emitted lines are evaluated by the guest login shell. They gate to bash,
 # list snippets with C collation for deterministic order, preserve the readable
-# and charset guards, and clean up the loop variable after sourcing.
+# and charset guards, and clean up the loop variable after sourcing. `command ls`
+# because ~/.profile sources ~/.bashrc first, which may alias or wrap ls.
 acq_login_profile_rc_block() {
   printf '%s\n' 'if [ -n "$BASH_VERSION" ] && [ -d "$HOME/.rc.d" ]; then'
-  printf '%s\n' '  for _acq_rc in $(LC_ALL=C ls "$HOME"/.rc.d 2>/dev/null); do'
+  printf '%s\n' '  for _acq_rc in $(LC_ALL=C command ls "$HOME"/.rc.d 2>/dev/null); do'
   printf '%s\n' '    _acq_rc="$HOME/.rc.d/$_acq_rc"'
   printf '%s\n' '    case "$_acq_rc" in *.sh) ;; *) continue ;; esac'
   printf '%s\n' '    [ -r "$_acq_rc" ] || continue'
@@ -2458,6 +2489,203 @@ acq_cli_kits_load() {
   # otherwise leave any env-supplied value in place (do not clobber the env).
   [ -n "$_extras" ] && ACQ_EXTRA_KITS="$_extras"
   acq_debug "cli-kits: reloaded $backend/$name (${#ACQ_CLI_KITS[@]} cli kit(s))"
+  return 0
+}
+
+# ============================================================================
+# Host-authoritative per-sandbox config store (ADR-0035)
+# ============================================================================
+# acq must NOT rely on guest-generated or guest-tamperable state to configure a
+# sandbox: the in-sandbox agent has passwordless sudo, so a root-owned GUEST path
+# (e.g. /var/lib/acq/agent) is NOT a trust boundary against a prompt-injected
+# agent — it can sudo-rewrite any such file, and acq would then read the tampered
+# value back and act on it (which agent to launch, cwd, SSH_AUTH_SOCK, kit env).
+#
+# The only enforceable boundary is host<->guest. This store holds acq's trusted
+# per-sandbox config on the HOST (under the same state tree as provenance and the
+# cli-kits record) and, where the guest legitimately needs to read a value, acq
+# mounts the directory into the guest READ-ONLY (see the backend :ro mount).
+# The guest can read it but cannot write it; a sudo agent cannot forge it.
+#
+# Layout (host):   <provenance-dir>/<backend>/<safe-name>.<sum>.config/<KEY>
+# Guest mount:     ACQ_HOST_CONFIG_GUEST_DIR (read-only)  [default /var/lib/acq/host]
+# One flat file per KEY (value = raw bytes, no trailing newline added), so a
+# value may contain any byte a single line could not; readers get exactly what
+# was written. Atomic temp+rename write; fail-soft (mirrors the marker writes
+# it replaces, which were best-effort `|| true`).
+#
+# The sandbox config dir is chmod 0711: the guest must be able to traverse the
+# read-only mount root to execute `kit-files/...` staged code, but should not be
+# able to list acq-internal key names. Content-bearing flat keys remain 0600 on
+# the host; readonly kit code is staged under kit-files/ with executable perms.
+# The traversable dirs intentionally make known kit-file paths host-readable too;
+# only non-sensitive trusted code may be staged there.
+#
+# KEY charset is restricted ([A-Za-z0-9._-], no slash) so a key can never escape
+# the config dir; callers pass fixed literals (agent, workspace, ssh-auth-sock,
+# kit-env, and the gate markers).
+
+# The well-known guest mount point for the read-only host config dir. Overridable
+# for tests / unusual images. Kept under /var/lib/acq so it sits beside the
+# (being-migrated) legacy guest markers without colliding with them.
+ACQ_HOST_CONFIG_GUEST_DIR="${ACQ_HOST_CONFIG_GUEST_DIR:-/var/lib/acq/host}"
+
+# Host directory holding one sandbox's config files. Same keying as the
+# provenance/cli-kits records (sanitized name + raw-name checksum) so the three
+# sit side by side and never collide across backends or sanitizer-aliased names.
+acq_host_config_dir() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  local safe_backend safe_name name_sum
+  safe_backend=$(printf '%s' "$backend" | tr -c 'A-Za-z0-9._-' '_')
+  safe_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')
+  name_sum=$(printf '%s' "$name" | cksum 2>/dev/null | cut -d' ' -f1 2>/dev/null || echo 0)
+  printf '%s/%s/%s.%s.config\n' "$(_acq_provenance_dir)" "$safe_backend" "$safe_name" "$name_sum"
+}
+
+# Validate a config KEY: fixed-literal callers only, restricted charset, never a
+# path separator or traversal. Fail closed (return non-zero, emit nothing).
+_acq_host_config_key_ok() {
+  case "${1:-}" in
+    ""|.|..) return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Write one KEY's VALUE for a sandbox's host config. Creates/traversabilizes the
+# dir 0711 and writes the file 0600 (world-unreadable on the host; the guest sees
+# only what it can traverse/read via the :ro mount).
+# Atomic temp+rename. Best-effort: warns (debug) and returns non-zero on failure
+# but never aborts the caller — preserving the fail-soft posture of the guest
+# markers this replaces.
+# Usage: acq_host_config_write BACKEND NAME KEY VALUE
+acq_host_config_write() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}" value="${4:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  _acq_host_config_key_ok "$key" || { acq_debug "host-config: refusing unsafe key '$key'"; return 1; }
+  local dir file
+  dir=$(acq_host_config_dir "$backend" "$name") || return 1
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "host-config: could not create config dir: $dir"
+    return 1
+  fi
+  chmod 711 "$dir" 2>/dev/null || true
+  file="$dir/$key"
+  local tmp="${file}.tmp.$$"
+  ( umask 077; printf '%s' "$value" > "$tmp" ) 2>/dev/null || {
+    acq_debug "host-config: write failed: $tmp"; rm -f "$tmp" 2>/dev/null; return 1; }
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$file" 2>/dev/null || {
+    acq_debug "host-config: mv failed: $file"; rm -f "$tmp" 2>/dev/null; return 1; }
+  acq_debug "host-config: wrote $backend/$name/$key"
+  return 0
+}
+
+# Read one KEY's VALUE. Echoes the raw stored bytes (empty if absent/unreadable).
+# Never fails the caller (returns 0 even when the key is absent) so a reader under
+# `set -euo pipefail` behaves like the old failure-guarded guest `cat`.
+# Usage: acq_host_config_read BACKEND NAME KEY
+acq_host_config_read() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  _acq_host_config_key_ok "$key" || return 0
+  local dir file
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  file="$dir/$key"
+  [ -f "$file" ] || return 0
+  cat "$file" 2>/dev/null || true
+}
+
+# True (0) if a KEY exists for a sandbox. Replaces the guest `test -f` marker
+# gates (install-*, agent-*-ready) that a sudo guest could forge.
+# Usage: acq_host_config_has BACKEND NAME KEY
+acq_host_config_has() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  _acq_host_config_key_ok "$key" || return 1
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 1
+  [ -f "$dir/$key" ]
+}
+
+# Append VALUE (one line) to a KEY's file, creating it if needed. Used by the
+# kit-env accumulator (multiple kits each contribute lines). Same fail-soft
+# contract as acq_host_config_write.
+# Usage: acq_host_config_append BACKEND NAME KEY VALUE
+acq_host_config_append() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}" value="${4:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 1
+  _acq_host_config_key_ok "$key" || { acq_debug "host-config: refusing unsafe key '$key'"; return 1; }
+  local dir file
+  dir=$(acq_host_config_dir "$backend" "$name") || return 1
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    acq_debug "host-config: could not create config dir: $dir"; return 1
+  fi
+  chmod 711 "$dir" 2>/dev/null || true
+  file="$dir/$key"
+  if [ ! -f "$file" ]; then
+    ( umask 077; : > "$file" ) 2>/dev/null || {
+      acq_debug "host-config: create failed: $file"; return 1; }
+  fi
+  printf '%s\n' "$value" >> "$file" 2>/dev/null || {
+    acq_debug "host-config: append failed: $file"; return 1; }
+  chmod 600 "$file" 2>/dev/null || true
+  return 0
+}
+
+# Remove one KEY (e.g. reset kit-env before a full re-apply). Best-effort.
+# Usage: acq_host_config_clear BACKEND NAME KEY
+acq_host_config_clear() {
+  local backend="${1:-}" name="${2:-}" key="${3:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  _acq_host_config_key_ok "$key" || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  rm -f "$dir/$key" 2>/dev/null || true
+  return 0
+}
+
+# Remove per-sandbox instance keys before provisioning a freshly-created sandbox.
+# The host config dir is keyed by sandbox name, so a sandbox removed outside acq
+# can leave stale state behind for a later same-named sandbox. Clear run-once
+# gates and conditionally-written content keys before provision rewrites the
+# current instance's authoritative values.
+# Usage: acq_host_config_clear_instance_state BACKEND NAME
+acq_host_config_clear_instance_state() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  case "$dir" in ""|/|/*/) return 0 ;; esac
+  rm -f "$dir"/install-* "$dir"/agent-installed-* \
+        "$dir"/agent-user-ready \
+        "$dir"/workspace "$dir"/ssh-auth-sock "$dir"/generic-opencode 2>/dev/null || true
+  return 0
+}
+
+# True when a sandbox was created with the generic OpenCode base and its pinned
+# kit. This is host-authoritative create-time state, not a per-invocation flag.
+# Usage: acq_instance_uses_generic_opencode BACKEND NAME
+acq_instance_uses_generic_opencode() {
+  case "$(acq_host_config_read "$1" "$2" generic-opencode 2>/dev/null || true)" in
+    generic-opencode|1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Remove a sandbox's entire host config dir (called from terminate). Best-effort.
+# Usage: acq_host_config_remove BACKEND NAME
+acq_host_config_remove() {
+  local backend="${1:-}" name="${2:-}"
+  [ -n "$backend" ] && [ -n "$name" ] || return 0
+  local dir
+  dir=$(acq_host_config_dir "$backend" "$name") || return 0
+  # Guard against a pathological empty resolution before rm -rf.
+  case "$dir" in
+    ""|/|/*/) return 0 ;;
+    *.config) rm -rf "$dir" 2>/dev/null || true ;;
+  esac
   return 0
 }
 
@@ -3944,6 +4172,9 @@ _acq_configure_provider() {
 # for the GitHub-token-scoping default, and persists both to config.yaml
 # (preserving the `backend:` key). Also accepts `--provider <id>` to configure
 # the default generative LLM provider directly.
+# The entry point (acq) calls this with "$@" for `acq configure --provider ...`;
+# The linter only sees the argument-less call below, so it misreads SC2120.
+# shellcheck disable=SC2120
 acq_configure() {
   if [ "$#" -gt 0 ]; then
     _acq_configure_provider "$@"
